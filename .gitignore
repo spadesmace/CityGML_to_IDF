@@ -1,0 +1,30 @@
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+
+# Generated EnergyPlus / parser outputs
+citygml2idf/output/
+citygml2idf/output2/
+citygml2idf/output3/
+
+# Local EnergyPlus and FMU installations are kept outside Git.
+citygml2idf/templates/EnergyPlus-*/
+citygml2idf/templates/EnergyPlusToFMU/
+
+# Generated simulation/report files
+*.audit
+*.bnd
+*.dxf
+*.eio
+*.end
+*.err
+*.mdd
+*.mtd
+*.rdd
+*.shd
+*.idf
+*.epw
+*.fmu
+
+# Local generated previews
+*_preview.png

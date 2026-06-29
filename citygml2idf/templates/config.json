@@ -1,0 +1,96 @@
+{
+  "output_columns": {
+    "id": { "matching_cols": ["id"] },
+    "dest": { "matching_cols": ["edifc_uso", "edific_uso", "USO", "uso", "use", "dest", "DEST"] },
+    "height": { "matching_cols": ["un_vol_av", "height", "altezza", "h", "H", "HEIGHT", "H_EAVES"] },
+    "w2w": { "matching_cols": ["w2w", "window_to_wall", "w_to_w"] },
+    "year_of_construction": { "matching_cols": ["year_of_construction", "anno_costruzione", "year", "YEAR"] },
+    "tabula_type": { "matching_cols": ["tabula_type", "Tabula_type", "tabula"] },
+    "hvac_type": { "matching_cols": ["hvac_type", "heating", "hvac"] },
+    "occupied": { "matching_cols": ["occupied", "occupato", "occupancy"] },
+    "area": { "matching_cols": ["area", "AREA", "surface"] },
+    "n_floors": { "matching_cols": ["n_floors", "floors", "num_floors"] },
+    "gross_floor_area": { "matching_cols": ["gross_floor_area", "GFA"] },
+    "net_leased_area": { "matching_cols": ["net_leased_area", "NLA"] }
+  },
+
+  "matching_values": {
+    "dest": {
+      "residential": [
+        "residential", 
+        "abitazione",
+        "residenziale", 
+        "res", 
+        "residenza", 
+        "house", 
+        "home", 
+        "abitativo", 
+        "abitativa",
+        "ville e villette",
+        "edilizia rurale",
+        "residenziale e commerciale", 
+        "residenziale e ufficio pubblico",
+        "residenziale e terziaria"
+      ],
+      "commercial": [
+        "commercial", 
+        "shop", 
+        "negozio", 
+        "office", 
+        "ufficio",
+        "terziaria",
+        "commerciale"
+      ],
+      "industrial": [
+        "industrial", 
+        "industriale", 
+        "factory",
+        "produttiva",
+        "artignale",
+        "stabilimento industriale", 
+        "rifornimento carburanti",
+        "agricola",
+        "accessorio"
+      ]
+    }
+  },
+
+ "census_columns": {
+    "occupied_dwellings": "A2",
+    "holiday_dwellings": "A7",
+    "residential_count": "E3",
+    "commercial_count": "E4"
+  },
+
+  "leased_area_CF": 0.9,
+  "avg_floor_height": 3.0,
+  "max_neighbor_distance_m": 40, 
+
+  "year_map": {
+    "E8":  [1900, 1918],  
+    "E9":  [1919, 1945],  
+    "E10": [1946, 1960],  
+    "E11": [1961, 1970],  
+    "E12": [1971, 1980],  
+    "E13": [1981, 1990],  
+    "E14": [1991, 2000],  
+    "E15": [2001, 2005], 
+    "E16": [2006, 2022]   
+  },
+ 
+  "envelope_eff_map": {
+    "E28": "high",
+    "E29": "medium",
+    "E30": "low",
+    "E31": "low"
+  },
+
+  "family_map": {
+    "PF3": 1,
+    "PF4": 2,
+    "PF5": 3,
+    "PF6": 4,
+    "PF7": 5,
+    "PF8": 6
+  }
+}
