@@ -1,7 +1,8 @@
 # EPLUS_RULES.md — what EnergyPlus requires of every IDF we write
 
-The rules the parser/writer MUST satisfy so an emitted IDF is *valid EnergyPlus*, grouped by
-the order we build a model:
+**The single, authoritative rulebook.** Every rule here is *what EnergyPlus itself requires* (IDD +
+Essentials + I/O Reference) — nothing else is canonical. The parser/writer MUST satisfy all of it so an
+emitted IDF is *valid EnergyPlus*. Grouped by the order we build a model:
 
 1. **[STAGE 1 — one building, one zone, any LoD](#stage-1)** → Geometry · Materials · Constructions
 2. **[STAGE 2 — Windows](#stage-2)**
@@ -39,9 +40,11 @@ Every rule cites its source. Three authorities, strongest first:
 `citygml2idf/templates/EnergyPlus-23.1.0-87ed9199d4-Windows-x86_64/energyplus.exe` (+ the EnergyPlusToFMU
 toolchain). The acceptance test for any rule is a run with **0 `** Severe` / `** Fatal`** in `eplusout.err`.
 
-> This file is the EnergyPlus-side contract only. How we *derive* each value from CityGML/Energy ADE
-> (the golden rule, the Excel waterfall, geometry-over-stated-attributes) lives in
-> [citygml2idf/RULES_code.md](citygml2idf/RULES_code.md) and is referenced by rule id (G/M/C/W/G12-13).
+> **Scope.** This file states only the EnergyPlus requirement and the minimal **Parser** action that
+> satisfies it. *How* we derive each value from CityGML / Energy ADE — the golden rule (trust only
+> structure/geometry/xlinks), the Excel-first construction waterfall, geometry-over-stated-attributes,
+> the ADE LoD/ThermalZone modelling — lives in the code and in `CLAUDE.md` / `MAPPING.md`, not in a second
+> rules file. If a parser policy and this file ever disagree, **EnergyPlus wins** and the policy is the bug.
 
 ---
 
@@ -64,7 +67,7 @@ vertices `\units m`, areas `m2`, volumes `m3`, conductivity `W/m-K`, etc.
 ### F2 — Axes: X = East, Y = North, Z = Up (right-handed) · **Logic**
 A projected vertex `(Easting, Northing, height)` maps directly to `(X, Y, Z)`.
 - **Parser:** a projected CityGML `posList` is already `(X=E, Y=N, Z=up)`; for a geographic CRS,
-  reproject lon→X, lat→Y, height stays Z (RULES G2).
+  reproject lon→X, lat→Y, height stays Z.
 - **Source:** Essentials §"Thermal Zones and Surfaces" — *"The X-axis points east, the Y-axis points
   north, and the Z-axis points up."*
 
@@ -74,7 +77,7 @@ A projected vertex `(Easting, Northing, height)` maps directly to `(X, Y, Z)`.
 this facility."*
 - **Parser:** emit exactly one `GlobalGeometryRules` with `Coordinate System = World`, and recenter the
   site so coordinates are small (min-corner → 0,0; floor → z=0) for numerical precision. Recentering is a
-  pure translation — areas/normals/winding unchanged (RULES G3).
+  pure translation — areas/normals/winding unchanged.
 - **Source:** IDD `GlobalGeometryRules` (`\required-object`, `\unique-object`, A3 `\required-field`,
   `\key World`).
 
@@ -87,7 +90,7 @@ EnergyPlus reads vertices *as viewed from outside the surface* (IDD note: *"Surf
 viewed from outside the surface"*).
 - **Parser:** we orient every ring outward (CCW from outside), so write `Vertex Entry Direction =
   Counterclockwise` and `Starting Vertex Position = UpperLeftCorner`. Whatever we declare here MUST equal
-  how the vertices were actually wound (RULES G4).
+  how the vertices were actually wound.
 - **Source:** IDD `GlobalGeometryRules:Starting Vertex Position / Vertex Entry Direction` · Essentials
   §"Thermal Zones and Surfaces" — *"the order of coordinates for each surface should start with the upper
   left corner (when viewed from 'outside' the zone with the surface) and that the coordinates should
@@ -97,15 +100,16 @@ viewed from outside the surface"*).
 A heat-transfer surface is a polygon (vertices only); thickness lives in the construction, not the geometry.
 The object is `\extensible:3` (x,y,z triplets) with `\min-fields 20`.
 - **Parser:** one `BuildingSurface:Detailed` per CityGML boundary surface, a single plane; map
-  `nrg3:bdgBdrySurfThickness` to materials, never to vertices (RULES G6).
+  `nrg3:bdgBdrySurfThickness` to materials, never to vertices.
 - **Source:** IDD `BuildingSurface:Detailed` (`\format vertices`, `\extensible:3`, `\memo … Does not
   include subsurfaces`).
 
 ### G-3 — ≥ 3 vertices, coplanar, given in metres · **Units + Logic**
-`Number of Vertices` (N2) is **`\minimum 3`**; each `Vertex n X/Y/Z-coordinate` is a `\required-field`
-`\units m`. The first triplet is `\required-field`; further triplets extend the object.
+`Number of Vertices` (N2) is **`\minimum 3`** (no maximum — base surfaces may have many); each
+`Vertex n X/Y/Z-coordinate` is a `\required-field` `\units m`. The first triplet is `\required-field`;
+further triplets extend the object.
 - **Parser:** every surface needs ≥ 3 (near-)coplanar corners in metres. We **warn, never drop** received
-  geometry that is thin/degenerate — it is a semantic check, not an E+ hard stop (RULES G7).
+  geometry that is thin/degenerate — it is a semantic check, not an E+ hard stop.
 - **Source:** IDD `BuildingSurface:Detailed:Number of Vertices` (`\minimum 3`), `Vertex 1 X-coordinate`
   (`\required-field`, `\units m`).
 
@@ -120,7 +124,7 @@ GML rings are closed (last point = first). EnergyPlus wants the distinct corners
 The "CCW from outside" rule exists so each surface normal faces the exterior: floor normal down, roof up,
 wall sideways-out. EnergyPlus derives the surface's orientation from the winding.
 - **Parser:** compute the Newell normal; flip the ring if it points toward the zone/solid centroid
-  (`geometry.rings.orient_outward`). Never trust the exporter's winding (RULES G5).
+  (`geometry.rings.orient_outward`). Never trust the exporter's winding.
 - **Source:** Essentials (CCW-from-outside ⇒ outward normal) · IDD `GlobalGeometryRules` note
   *"as viewed from outside the surface."*
 
@@ -128,7 +132,7 @@ wall sideways-out. EnergyPlus derives the surface's orientation from the winding
 EnergyPlus computes azimuth, tilt, area and height **from the vertices** and ignores any separately
 stated value.
 - **Parser:** build from vertices only; use `nrg3:bdgBdrySurfAzimuth`/`bdgArea`/`bdgHeight` solely as a
-  warn-on-mismatch sanity check (a ~1° azimuth delta = UTM grid-north vs true-north, expected) (RULES G11).
+  warn-on-mismatch sanity check (a ~1° azimuth delta = UTM grid-north vs true-north, expected).
 - **Source:** Essentials §"Thermal Zones and Surfaces" — *"EnergyPlus uses the three dimensional position
   of each corner of a surface to define the position and orientation of that surface"* (azimuth/tilt/area
   are therefore derived from the vertices) · I/O Reference `BuildingSurface:Detailed`.
@@ -157,7 +161,7 @@ Surface | Zone | Foundation | OtherSideCoefficients | …`. Only `Outdoors` is s
 | interior/shared (single-zone here) | Wall/Floor/Ceiling | `Adiabatic` | NoSun / NoWind |
 - **Parser:** `Ground`/`Adiabatic`/`Surface`/`Zone` ⇒ `NoSun, NoWind`; only `Outdoors` ⇒ exposed
   (`semantics/surface_types.sun_wind_exposure`). In a single-zone build, all interior faces are
-  `Adiabatic` (multizone upgrades this — see STAGE 3, G12).
+  `Adiabatic` (multizone upgrades this — see STAGE 3, Z-2).
 - **Source:** IDD `BuildingSurface:Detailed:Outside Boundary Condition` (the `\key` list) + `Sun Exposure`/
   `Wind Exposure` (`\key NoSun`/`\key NoWind`).
 
@@ -168,7 +172,7 @@ Surface | Zone | Foundation | OtherSideCoefficients | …`. Only `Outdoors` is s
 - **Parser:** emit one `Zone` (the whole building when there is no `nrg3:ThermalZone`); set
   `Ceiling Height`/`Floor Area` = `autocalculate`, `Multiplier = 1`, origin (0,0,0). Pass `Volume` only if
   the ADE gives `nrg3:volume`, else `autocalculate`. The zone must be a closed solid or E+ warns
-  "not fully enclosed" (RULES G9).
+  "not fully enclosed".
 - **Source:** IDD `Zone` (N6 `\minimum 1`; N7/N8/N9 `\autocalculatable`; origins `\units m`).
 
 ## 1.B MATERIALS
@@ -178,7 +182,7 @@ Surface | Zone | Foundation | OtherSideCoefficients | …`. Only `Outdoors` is s
 `Material:AirGap` (*"Air Space in Opaque Construction"*, R-value only).
 - **Parser:** `nrg3:SolidMaterial` with conductivity+density+specific-heat+thickness → `Material`; a layer
   with only an R-value → `Material:NoMass`; `nrg3:Gas`/air cavity with an R-value → `Material:AirGap`. Pick
-  by source, never by name (RULES M1).
+  by source, never by name.
 - **Source:** IDD `Material`, `Material:NoMass` (`\memo … principal description is R`), `Material:AirGap`
   (`\memo Air Space in Opaque Construction`) · I/O Reference: NoMass — *"using a simple R-value only
   material forces EnergyPlus to assume steady state heat conduction through this material layer"*; AirGap —
@@ -196,7 +200,7 @@ Surface | Zone | Foundation | OtherSideCoefficients | …`. Only `Outdoors` is s
 | Thermal/Solar/Visible Absorptance (N5–N7) | – | optional, default `0.9 / 0.7 / 0.7` |
 - **Parser:** Energy ADE SI ≡ E+ SI (W/(m·K), J/(kg·K)) → DIRECT, no conversion. Fill absorptances with the
   defaults; never emit a `Material` missing a required field — default it (+ warn) or downgrade to
-  `NoMass`. Watch the **`Specific Heat ≥ 100`** floor (RULES M2).
+  `NoMass`. Watch the **`Specific Heat ≥ 100`** floor.
 - **Source:** IDD `Material` (`\min-fields 6`; N1–N3 `\minimum> 0`; N4 `\minimum 100`; N5–N7 `\default`).
 
 ### M-3 — `Roughness` is a 6-value choice · **Naming**
@@ -223,9 +227,10 @@ string (`\object-list MaterialName`).
 ### C-1 — A `Construction` is an ordered layer list, OUTSIDE → INSIDE · **Logic**
 *"Start with outside layer and work your way to the inside layer."* `Outside Layer` (A2) is
 `\required-field`; then `Layer 2 … Layer 10` (`Up to 10 layers total, 8 for windows`).
-- **Parser:** write layers outside→inside. CityGML/ADE document order may be inside→outside — reverse to
-  E+ order when the source says so (the middle layer records `layer_order`); never silently mis-order
-  (RULES C1).
+- **Parser:** write layers outside→inside. The CityGML/Energy ADE layer order is **inside→outside**, so the
+  writer **reverses** it for EnergyPlus (the middle layer records `layer_order = inside_to_outside`); never
+  silently mis-order. *(Confirm the ADE direction against the Energy ADE spec/XSD — a silent reversal is a
+  valid-but-wrong-physics bug.)*
 - **Source:** IDD `Construction` (`\memo Start with outside layer …`; A2 `\required-field`;
   `\memo Up to 10 layers`) · I/O Reference — layers are assembled *"from the outside layer to the inside
   layer"*.
@@ -234,14 +239,14 @@ string (`\object-list MaterialName`).
 `BuildingSurface:Detailed:Construction Name` (A3) `\required-field` `\object-list ConstructionNames`
 (single reference). Each `Construction` layer is `\object-list MaterialName` → must name a real material.
 - **Parser:** 1 surface → 1 construction → N material layers. Never emit a `Construction` referencing an
-  undefined material (Excel-first waterfall: Excel → file's inline layers → default + warn) (RULES C2/C5).
+  undefined material (Excel-first waterfall: Excel → file's inline layers → default + warn).
 - **Source:** IDD `BuildingSurface:Detailed:Construction Name` (`\required-field`) · `Construction` layers
   (`\object-list MaterialName`).
 
 ### C-3 — Unique construction names; define once, reference N times · **Naming**
 `Construction:Name` (A1) `\reference ConstructionNames`; surfaces reference it by that exact string.
 - **Parser:** keep CityGML construction ids/codes as unique names; dedup so a construction used on many
-  surfaces is written **once** and referenced many times (RULES C3/C4).
+  surfaces is written **once** and referenced many times.
 - **Source:** IDD `Construction:Name` (`\reference ConstructionNames`).
 
 ### C-4 — Layer-count ceiling · **Logic**
@@ -256,7 +261,7 @@ Up to **10** layers for opaque constructions (8 for windows).
 
 Add only when STAGE 1 runs clean. A window is a `FenestrationSurface:Detailed` hosted on a wall, plus a
 glazing `Construction`/`WindowMaterial:*`. **Never invented** — emitted only when the CityGML supplies a
-source (project golden rule; see RULES W1).
+source (project golden rule).
 
 ## 2.A GEOMETRY (sub-surface)
 
@@ -264,15 +269,14 @@ source (project golden rule; see RULES W1).
 `\min-fields 18`. Required: `Name` (A1), `Surface Type` (A2), `Construction Name` (A3),
 `Building Surface Name` (A4 — the host wall, `\object-list SurfaceNames`).
 - **Parser:** one `FenestrationSurface:Detailed` per window, `Building Surface Name` = its host
-  `BuildingSurface:Detailed` (RULES W1/G10).
+  `BuildingSurface:Detailed`.
 - **Source:** IDD `FenestrationSurface:Detailed` (`\min-fields 18`; A1–A4 `\required-field`;
   A4 `\object-list SurfaceNames`).
 
 ### W-2 — Sub-surface `Surface Type` is a 5-value choice · **Naming**
 `Surface Type` (A2, `\required-field`): `Window | Door | GlassDoor | TubularDaylightDome |
 TubularDaylightDiffuser`.
-- **Parser:** glazing → `Window`. Doors are folded into opaque wall area for now (RULES W5); promote to
-  `Door` later.
+- **Parser:** glazing → `Window`. Doors are folded into opaque wall area for now; promote to `Door` later.
 - **Source:** IDD `FenestrationSurface:Detailed:Surface Type` (`\key` list).
 
 ### W-3 — 3 or 4 vertices, in metres, coplanar with and inside the host · **Units + Logic**
@@ -282,7 +286,7 @@ triangles."*
 - **Parser:** a synthesized window (from a WWR) = a coplanar rectangle of area = `WWR × wall_area`, centred
   and inset on the host plane (scale the wall ring about its centre by √WWR). An explicit LoD3 opening that
   is not coplanar with its host must be **projected onto the host-wall plane** (or warned + skipped) —
-  EnergyPlus requires the sub-surface coplanar with its base, and area ≤ host area (RULES W2).
+  EnergyPlus requires the sub-surface coplanar with its base, and area ≤ host area.
 - **Source:** IDD `FenestrationSurface:Detailed:Number of Vertices` (`\minimum 3 \maximum 4`), `Vertex …`
   (`\units m`, `\note Not used for triangles`).
 
@@ -290,8 +294,9 @@ triangles."*
 If an explicit `bldg:Window` and a stated `…OpeningToSurfaceRatio` disagree, trust the geometry, warn (same
 authoritative-vertices principle as G-6).
 - **Parser:** richest→poorest source: explicit `bldg:Window` → `openingToSurfaceRatio` →
-  `(total−opaque)/total` → none/opaque (RULES W1/W4).
-- **Source:** I/O Reference (fenestration area is derived from vertices) · project rule W4.
+  `(total−opaque)/total` → none/opaque.
+- **Source:** I/O Reference (fenestration area is derived from vertices) · same vertices-are-truth principle
+  as G-6.
 
 ## 2.B GLAZING MATERIAL & CONSTRUCTION
 
@@ -299,7 +304,7 @@ authoritative-vertices principle as G-6).
 Two methods: `WindowMaterial:SimpleGlazingSystem` (U + SHGC only) **or** `WindowMaterial:Glazing` +
 `WindowMaterial:Gas` (detailed panes). A window `Construction` lists these glazing materials (≤ 8 layers).
 - **Parser:** only a U-value + g-value present → one `SimpleGlazingSystem`; real glass panes + `nrg3:Gas`
-  → `Glazing` + `Gas`. Opaque M1/M2 logic is never reused for glass (RULES M3/W3).
+  → `Glazing` + `Gas`. Opaque M-1/M-2 logic is never reused for glass.
 - **Source:** IDD `WindowMaterial:SimpleGlazingSystem` (`\memo … define an entire glazing system using
   simple performance parameters`), `WindowMaterial:Glazing`, `WindowMaterial:Gas` · I/O Reference —
   SimpleGlazingSystem is *"for when you only have U-factor and SHGC"* values rather than detailed optics.
@@ -309,8 +314,9 @@ Two methods: `WindowMaterial:SimpleGlazingSystem` (U + SHGC only) **or** `Window
 coefficients"*); `Solar Heat Gain Coefficient` (N2, `\required-field`, `\minimum> 0 \maximum< 1`);
 `Visible Transmittance` (N3) optional. `Name` carries `\reference MaterialName` **and**
 `\reference GlazingMaterialName`.
-- **Parser:** map `nrg3:uValue → U-Factor` (W/m²·K). **`gValue → SHGC` is UNVERIFIED** against the ADE
-  spec — confirm before mapping; SHGC must be strictly between 0 and 1 (RULES W3, C6).
+- **Parser:** map `nrg3:uValue → U-Factor` (W/m²·K). Map ADE `gValue` to EnergyPlus
+  `Solar Heat Gain Coefficient` when using `WindowMaterial:SimpleGlazingSystem`; both describe solar
+  gain through the glazing system, and SHGC must be strictly between 0 and 1.
 - **Source:** IDD `WindowMaterial:SimpleGlazingSystem` (N1 `\units W/m2-K \minimum> 0`; N2 `\minimum> 0
   \maximum< 1`).
 
@@ -333,8 +339,7 @@ described.
 `Zone:Name` (A1) `\required-field`, unique across Zone/Space/ZoneList. Each surface's `Zone Name` (A4) must
 name an existing zone.
 - **Parser:** emit one `Zone` per `nrg3:ThermalZone`; assign each surface to its owning zone via the
-  `nrg3:thermalBoundary` xlink (or to the single hull zone when `coincidesWithLoDxHull` / no zones)
-  (RULES G9/G13).
+  `nrg3:thermalBoundary` xlink (or to the single hull zone when `coincidesWithLoDxHull` / no zones).
 - **Source:** IDD `Zone:Name` (`\required-field`, unique) · `BuildingSurface:Detailed:Zone Name`
   (`\required-field`, `\object-list ZoneNames`).
 
@@ -343,7 +348,7 @@ name an existing zone.
 specify name of corresponding surface in adjacent zone … If Zone, specify the name of the corresponding
 zone and the program will generate the corresponding interzone surface."* `Adiabatic` = no other side
 (no conduction, but the layers still store/release heat — thermal mass kept).
-- **Parser (`model/zones.py`, RULES G12):**
+- **Parser (`model/zones.py`):**
   - face shared by **two modelled zones of the same building** → **interzone**;
   - face against **another building / the shell**, a **single-zone** building, or an **unmodelled** zone →
     **`Adiabatic`**;
@@ -360,7 +365,7 @@ auto-generate the partner — our documented fallback.)
 - **Parser:** the owner face stays in zone A with `A6=Surface`, `A7=`twin name; a **reversed twin** is added
   to zone B — reversed winding, Floor↔Ceiling flipped, mirror construction `<name>_Rev` when multi-layer —
   with `A6=Surface`, `A7=`owner name. Re-orient the owner outward from **its own** zone centroid so its
-  Floor/Ceiling label is correct (RULES G12, IMPLEMENTED).
+  Floor/Ceiling label is correct. (IMPLEMENTED.)
 - **Source:** IDD `BuildingSurface:Detailed` A6 (`\key Surface`) + A7 (*"name of corresponding surface in
   adjacent zone"*).
 
@@ -381,7 +386,7 @@ EnergyPlus warns/severes when a zone is "not fully enclosed" or lacks a floor. I
 both zones a real bounding floor/ceiling so each closes.
 - **Parser:** ensure every zone has a complete set of bounding surfaces (the owner + reversed twins). Faith-
   fully kept but geometrically inconsistent CityGML (e.g. a 5th wall on a 4-wall box) will still warn — we
-  never drop received geometry (RULES G7; process.md Stage 3).
+  never drop received geometry (see process.md Stage 3).
 - **Source:** I/O Reference, surface/zone enclosure checks · IDD `Zone` (auto floor area/volume need closure).
 
 ---

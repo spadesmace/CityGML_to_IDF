@@ -1,8 +1,8 @@
-"""
-write/writer.py — MIDDLE LAYER → EnergyPlus 23.1 IDF, one IDF per building.
+﻿"""
+write/writer.py â€” MIDDLE LAYER â†’ EnergyPlus 23.1 IDF, one IDF per building.
 
-Builds each IDF from an EMPTY IDF, block by block (eppy newidfobject): settings →
-Material/NoMass/AirGap → Construction → Zone → BuildingSurface:Detailed. Every value
+Builds each IDF from an EMPTY IDF, block by block (eppy newidfobject): settings â†’
+Material/NoMass/AirGap â†’ Construction â†’ Zone â†’ BuildingSurface:Detailed. Every value
 comes from the middle layer (geometry already metric, recentred, wound outward; each
 surface tagged with Surface_Type / boundary / construction). No template, no extrusion.
 
@@ -26,11 +26,11 @@ from eppy.modeleditor import IDF
 
 from ..citygml import xml_io
 from ..semantics.surface_types import sun_wind_exposure
-from ..model.reader import build_middle_layer
+from ..model.reader import build_idf_middle_layer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PKG = os.path.dirname(_HERE)
-_TEMPLATES = os.path.join(os.path.dirname(_PKG), "templates")
+_TEMPLATES = os.path.join(_PKG, "templates")
 IDD_PATH = os.path.join(_TEMPLATES, "Energy+.idd")
 EPLUS_EXE = os.path.join(_TEMPLATES, "EnergyPlus-23.1.0-87ed9199d4-Windows-x86_64", "energyplus.exe")
 
@@ -56,7 +56,7 @@ def weather_available():
 
 
 def new_empty_idf(with_weather=False):
-    """The 'empty' IDF — settings only, no building yet (RULES §D). GlobalGeometryRules
+    """The 'empty' IDF â€” settings only, no building yet (RULES Â§D). GlobalGeometryRules
     matches how the reader wound vertices: World coords, Counterclockwise (outward).
 
     with_weather=False -> design-day-only IDF: NO RunPeriod and NO result/report outputs.
@@ -93,7 +93,7 @@ def new_empty_idf(with_weather=False):
     
     
 
-    # Annual run period (IDD: RunPeriod) — ONLY when we have weather; a design-day-only IDF omits it.
+    # Annual run period (IDD: RunPeriod) â€” ONLY when we have weather; a design-day-only IDF omits it.
     if with_weather:
         idf.newidfobject("RUNPERIOD", Name="FullYear",
                          Begin_Month=1, Begin_Day_of_Month=1, End_Month=12, End_Day_of_Month=31,
@@ -119,7 +119,7 @@ def new_empty_idf(with_weather=False):
     
     idf.newidfobject("OUTPUT:SURFACES:LIST", Report_Type="DetailsWithVertices")
     idf.newidfobject("OUTPUT:DIAGNOSTICS", Key_1="DisplayExtraWarnings")
-    # Result tables/variables (field names verified vs the IDD) — ONLY for a full (weather)
+    # Result tables/variables (field names verified vs the IDD) â€” ONLY for a full (weather)
     # run; a design-day-only IDF omits them (no annual results to report).
     if with_weather:
         idf.newidfobject("OUTPUTCONTROL:TABLE:STYLE", Column_Separator="HTML")
@@ -269,7 +269,7 @@ def run_energyplus(idf_path, weather=WEATHER_EPW, out_dir=None):
 
 def main(path=None):
     doc = xml_io.CityGMLDoc(path or xml_io.DEFAULT_INPUT)
-    middle = build_middle_layer(doc)
+    middle = build_idf_middle_layer(doc)
     cons, mats = middle["constructions"], middle["materials"]
     for b in middle["buildings"]:
         idf_path = build_idf(b, cons, mats)
@@ -284,3 +284,4 @@ def main(path=None):
 
 if __name__ == "__main__":
     main(sys.argv[1] if len(sys.argv) > 1 else None)
+

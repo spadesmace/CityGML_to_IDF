@@ -2507,3 +2507,584 @@ Continue with construction/material audit before moving to windows/multizone:
 4. Check ReverseLayeredConstruction with a real/targeted sample.
 5. Generate a clean opaque-only IDF batch after material fixes.
 ```
+
+## 2026-06-29 Session Note: Repo, Geometry Remainders, Construction Trace Start
+
+### Repo State
+
+The active GitHub repo is:
+
+```text
+https://github.com/spadesmace/CityGML_to_IDF.git
+```
+
+The correct local repo path is:
+
+```text
+C:\Users\smeys\OneDrive\Desktop\CityGMLtoIDF
+```
+
+Do not use or edit the old `MountainEC_tool` / `energycenterlab` repo for this project work.
+
+EnergyPlus and FMU template folders are intentionally local-only and should not be pushed:
+
+```text
+citygml2idf/templates/EnergyPlus-*/
+citygml2idf/templates/EnergyPlusToFMU/
+```
+
+Known local working-tree items at the start of this note:
+
+```text
+CLAUDE.md modified by user
+EPLUS_RULES.md modified by user
+citygml2idf/config.py modified by user
+citygml2idf/RULES_code.md deleted locally
+COVERAGE.md untracked
+```
+
+Do not revert or edit those unless the user asks.
+
+### What Changed This Session
+
+`citygml2idf/MAPPING.md` was updated to remember geometry gaps that are still not finished:
+
+```text
+[ ] MultiSurface overlap/duplicate-area detection
+[ ] Unsupported CityGML surface classes: OuterFloorSurface, InteriorWallSurface, ClosureSurface, etc.
+[ ] Complex GML geometry/curves not fully handled
+[ ] Window assignment to split MultiSurface parts still needs later check
+```
+
+No parser code should be changed without first explaining the small step and checking it together.
+
+### Geometry Status
+
+Geometry is acceptable for the current one-zone / opaque-first audit path, with these known limits:
+
+```text
+Handled:
+  semantic bldg:boundedBy surfaces
+  raw solid fallback when no semantic surfaces exist
+  LoD1 raw solid path
+  LoD2/LoD3 thermalBoundary path
+  coincidesWithLoD2Hull
+  coincidesWithLoD3Hull
+  Building + BuildingParts as one IDF building
+  MultiSurface with multiple surfaceMember polygons split into separate IDF surfaces
+
+Still open:
+  overlap/duplicate-area detection for multiple polygons
+  unsupported CityGML surface classes policy
+  curves/complex GML geometry support
+  assigning windows correctly when one parent MultiSurface is split into parts
+```
+
+Important note: XSD validation checks XML structure, not geometric correctness. It will not catch overlapping polygons.
+
+### Construction / Material Source Rules To Keep In Mind
+
+Energy ADE 3.0 layered construction rules we are following:
+
+```text
+Rule 7:
+  MaterialLibrary is a top-level object.
+  It contains Gas and SolidMaterial inline as libraryMember children.
+
+Rule 8:
+  LayeredConstructionLibrary is a top-level object.
+  It contains LayeredConstruction and ReverseLayeredConstruction inline as libraryMember children.
+
+Rule 4.8.3:
+  LayeredConstruction can be simple, e.g. only uValue.
+  Or it can contain ordered Layer objects.
+
+Rule 4.8.4:
+  Layer objects are inline under LayeredConstruction.
+  Each Layer points to its material by XLink.
+
+Rule 4.8.5:
+  ReverseLayeredConstruction points to a base LayeredConstruction by XLink.
+  It means the layer order must be inverted.
+```
+
+EnergyPlus target rules from `EPLUS_RULES.md`:
+
+```text
+Material:
+  thickness -> m
+  conductivity -> W/m-K
+  density -> kg/m3
+  specific heat -> J/kg-K
+  absorptance defaults can stay 0.9 / 0.7 / 0.7 for now
+
+Material:NoMass:
+  thermal resistance -> m2-K/W
+
+Material:AirGap:
+  thermal resistance -> m2-K/W
+
+Construction:
+  EnergyPlus layer order is outside-to-inside.
+  Energy ADE source order is treated as inside-to-outside.
+  The writer must reverse the parsed layer order for IDF.
+```
+
+### Where Construction Code Currently Handles This
+
+Main file:
+
+```text
+citygml2idf/model/constructions.py
+```
+
+Important current functions:
+
+```text
+_material_from_excel()
+  creates middle-layer material from Excel values
+
+_material_from_citygml()
+  creates middle-layer material from Gas / SolidMaterial in CityGML
+
+_from_excel()
+  creates construction from Excel when libraryCode matches
+
+_from_citygml()
+  creates construction from CityGML layers, ReverseLayeredConstruction, or uValue
+
+_construction_element()
+  finds legally reachable nrg3:layeredConstruction from a CityObject owner
+
+_construction_candidates()
+  checks surface first, then context owners such as ThermalZone / BuildingPart / Building
+
+_resolve_surface()
+  chooses Excel first, then CityGML fallback, then default
+
+resolve_all()
+  assigns selected construction names to parsed surfaces
+```
+
+### Current Construction / Material Gap
+
+The selection logic exists, but the trace is not strong enough yet.
+
+For every surface construction decision, we want the middle layer / trace to show:
+
+```text
+surface_id
+source_gml_id
+candidate owners checked
+selected owner
+selected construction id
+libraryCode
+codeSpace
+source = excel | citygml_layers | citygml_uvalue | default
+why default was used, if default
+raw CityGML value and uom
+converted EnergyPlus value and unit
+```
+
+Current known code gaps:
+
+```text
+_construction_code()
+  reads only libraryCode text, not codeSpace.
+
+_from_citygml()
+  returns source as citygml, but should distinguish citygml_layers vs citygml_uvalue.
+
+_resolve_surface()
+  returns the selected construction, but not the full decision path.
+
+resolve_all()
+  caches construction names, so trace must be added carefully without hiding per-surface owner checks.
+
+Gas.rValue
+  must not silently become Material:AirGap unless the value is already m2-K/W or convertible.
+```
+
+### Next Start
+
+Start construction/material work with a trace-only patch. Do not change selection behavior first.
+
+Planned first patch:
+
+```text
+1. Add a helper that reads libraryCode text and codeSpace.
+2. Add a helper that records candidate owners checked.
+3. Add construction_trace to each surface.
+4. Keep Excel -> CityGML -> default behavior unchanged.
+5. Run small probes and compare trace directly against GML before touching IDF writer behavior.
+```
+
+After trace exists, test these cases together:
+
+```text
+1. Poor LoD1 / box building:
+     should use default and explain no reachable layeredConstruction.
+
+2. LoD1 averaged construction fixtures:
+     ThermalZone -> layeredConstruction -> Excel match
+     ThermalZone -> layeredConstruction -> CityGML inline layers
+     ThermalZone -> layeredConstruction -> CityGML uValue
+
+3. Rich Alderaan building:
+     surface or thermalBoundary construction should resolve from real GML.
+
+4. Mixed Alderaan output:
+     compare middle-layer trace to direct GML before trusting IDF material/construction output.
+```
+
+## 2026-06-29 Session Note: Construction / Material Trace Implemented
+
+### What Changed In Code
+
+Main file changed:
+
+```text
+citygml2idf/model/constructions.py
+```
+
+Construction/material parsing is now more traceable and safer:
+
+```text
+[x] Added libraryCode + codeSpace reading for LayeredConstruction.
+[x] Added per-surface construction_trace.
+[x] Trace records candidate owners checked:
+      surface
+      ThermalZone
+      BuildingPart / Building context where available
+[x] Trace records selected owner, selected construction id, libraryCode, codeSpace, source, and why default.
+[x] Split CityGML fallback source into:
+      citygml_layers
+      citygml_uvalue
+[x] Preserved raw CityGML material values and uom in middle layer.
+[x] Stored converted EnergyPlus units/values in material dicts.
+[x] Added conductivity, density, thickness, specific heat, and uValue conversion helpers.
+[x] Gas.rValue no longer silently becomes 0.15.
+```
+
+Important behavior after this session:
+
+```text
+SolidMaterial:
+  thermalConductivity -> W/m-K
+  density             -> kg/m3
+  specificHeat        -> J/kg-K, EnergyPlus minimum enforced at 100
+  Layer.thickness     -> m
+
+LayeredConstruction with only uValue:
+  uValue W/m2-K -> R = 1/uValue m2-K/W -> Material:NoMass
+
+Gas:
+  if rValue unit is m2-K/W -> Material:AirGap
+  if rValue unit is not thermal resistance, e.g. J/K/mol -> do NOT convert to AirGap;
+  keep raw data and use default material for that layer for now.
+```
+
+### Test Outputs Created
+
+New generated test output root:
+
+```text
+citygml2idf/test_outputs/
+```
+
+Each numbered folder contains:
+
+```text
+README.md
+middle_layer_geometry_construction_material.json
+construction_material_trace_summary.json
+```
+
+Created outputs:
+
+```text
+output01_lod1_avg_excel_construction
+  Source: citygml2idf/input/test_lod1_avg_construction.gml
+  Building: test_lod1_avg_building
+  Result: LoD1 ThermalZone-level layeredConstruction -> libraryCode -> Excel
+  Source counts: excel = 6 surfaces
+
+output02_lod2_coincides_default_construction
+  Source: citygml2idf/validation_file/Alderaan_Energy_ADE_Core_Building_physics_CoincidesWithLoD2Hull.gml
+  Building: id_building_1
+  Result: coincidesWithLoD2Hull=true -> use bldg:boundedBy building shell
+  Construction result: no layeredConstruction on surface, ThermalZone, or Building -> DEFAULT_CONSTRUCTION
+  Source counts: default = 7 surfaces
+
+output03_lod3_alderaan_excel_citygml_layers
+  Source: citygml2idf/validation_file/Alderaan_Energy_ADE_All.gml
+  Building: id_building_1
+  Result: LoD3 thermalBoundary surfaces with surface-level layeredConstruction
+  Source counts:
+      citygml_layers = 3 surfaces
+      excel          = 4 surfaces
+```
+
+### What We Verified Together
+
+```text
+[x] LoD1 averaged construction can resolve through ThermalZone-level layeredConstruction.
+[x] LoD2 coincidesWithLoD2Hull uses the building shell instead of thermalBoundary surfaces.
+[x] LoD2 default is explainable when no reachable layeredConstruction exists.
+[x] LoD3 rich ADE path uses thermalBoundary surfaces.
+[x] Surface-level layeredConstruction is found on LoD3 thermalBoundary surfaces.
+[x] Excel priority works for libraryCode layered_constr_library_code_2.
+[x] CityGML layer fallback works for ground/roof constructions.
+[x] Middle layer now shows raw CityGML material values and EnergyPlus converted values.
+[x] Bad Alderaan specificHeatCapacity values are preserved raw and converted to E+ safe 1000 J/kg-K.
+[x] Gas rValue with unit J/K/mol is preserved raw and rejected for Material:AirGap thermal resistance.
+```
+
+### Important Source Logic Confirmed
+
+Energy ADE / CityGML logic:
+
+```text
+LayeredConstruction can have:
+  libraryCode
+  uValue
+  gValue / glazingRatio / optical fields
+  ordered Layer[*]
+
+Layer objects are inline under LayeredConstruction.
+Layer.material is by XLink to Gas or SolidMaterial in MaterialLibrary.
+Energy ADE layer order is inside-to-outside.
+ReverseLayeredConstruction points by XLink to a base LayeredConstruction and reverses order.
+```
+
+EnergyPlus logic:
+
+```text
+Construction layers must be written outside-to-inside.
+Writer reverses middle-layer inside_to_outside order for EnergyPlus.
+
+Material requires:
+  thickness m
+  conductivity W/m-K
+  density kg/m3
+  specific heat J/kg-K, >= 100
+
+Material:NoMass requires:
+  thermal resistance m2-K/W
+
+Material:AirGap requires:
+  thermal resistance m2-K/W
+```
+
+Window note:
+
+```text
+ADE gValue can map to EnergyPlus SimpleGlazingSystem SHGC for simple window construction.
+Detailed window materials are still later.
+```
+
+### Current Construction / Material Checklist Status
+
+Done:
+
+```text
+[x] LayeredConstruction resolved from surface / ThermalZone / Building context.
+[x] libraryCode read from CityGML.
+[x] codeSpace traced.
+[x] Excel priority when libraryCode exists in Excel.
+[x] CityGML layer fallback when Excel does not win.
+[x] Layer -> material XLink.
+[x] SolidMaterial -> EnergyPlus Material.
+[x] Layer.thickness -> metres.
+[x] CityGML uValue -> Material:NoMass with R = 1 / U.
+[x] Default construction only when no usable construction exists.
+[x] Every surface has construction_trace explaining the decision.
+[x] Raw CityGML material values preserved in middle layer.
+[x] Converted EnergyPlus material values stored in middle layer.
+[x] Gas rValue no longer blindly converted to 0.15.
+[x] Bad gas rValue units like J/K/mol are flagged and defaulted.
+[x] Energy ADE layer order stored as inside_to_outside.
+[x] Writer reverses layers for EnergyPlus outside_to_inside.
+```
+
+Remaining:
+
+```text
+[ ] Re-run IDF/EnergyPlus after the construction.py changes.
+[ ] Check ReverseLayeredConstruction with a real targeted output.
+[ ] Check if Excel should match by code only or codeSpace + code.
+[ ] Validate Excel required columns and units before trusting it.
+[ ] Add clearer trace for Excel material raw/converted values.
+[ ] Decide policy for bad SolidMaterial specificHeatCapacity:
+      current behavior: if below E+ minimum, use 1000 and keep raw value.
+[ ] Decide policy for Gas with non-resistance rValue:
+      current behavior: default opaque material for that layer.
+      possible future: skip layer, NoMass, or ask professor.
+[ ] Check EnergyPlus maximum construction layer count before writer emits Construction.
+[ ] Check Material:AirGap layer-position policy with EnergyPlus/professor.
+[ ] Decide whether optical ADE fields on opaque LayeredConstruction
+      emissivity / reflectance / transmittance / glazingRatio
+      should be stored now or left for window phase.
+[ ] Add detailed window construction tests later:
+      WindowMaterial:Glazing + WindowMaterial:Gas.
+```
+
+### Next Recommended Start
+
+Start next session from construction/material verification, not windows yet:
+
+```text
+1. Open output03 and inspect one Excel surface and one CityGML-layer surface.
+2. Decide policy questions:
+     code only vs codeSpace + code
+     bad specificHeatCapacity
+     Gas rValue not m2-K/W
+3. Create targeted ReverseLayeredConstruction output.
+4. Re-run opaque-only IDF/EnergyPlus with the new construction.py changes.
+5. Update MAPPING.md checklist after those checks.
+```
+
+## 2026-06-30 Session Note: Two Middle-Layer Views Decision
+
+Decision agreed:
+
+```text
+Alderaan_Energy_ADE_All.gml remains the main integration benchmark because it is the richest valid CityGML 2 + Energy ADE 3 sample we currently have.
+Small extracted/targeted GML files are useful for teaching and debugging, but they do not replace Alderaan All as the parser confidence test.
+```
+
+Middle-layer architecture decision:
+
+```text
+The parser should produce two views from the same parser run, not two parser paths.
+
+1. Trace/debug middle layer
+   Full evidence for teaching and validation:
+     raw CityGML ids
+     source_gml_id
+     candidate owners checked
+     selected owner / construction
+     libraryCode and codeSpace
+     raw CityGML values and uom
+     converted EnergyPlus values and units
+     fallback reasons
+     parser source = excel | citygml_layers | citygml_uvalue | default
+
+2. IDF middle layer
+   Clean writer contract only:
+     buildings
+     zones
+     surfaces
+     constructions
+     materials
+     windows/window_construction later
+   All values here must already be EnergyPlus-ready.
+```
+
+Important modularity rule:
+
+```text
+writer.py must read only the IDF middle layer / clean writer fields.
+writer.py must not know CityGML, Energy ADE schema, Excel lookup, XLinks, codeSpace, or fallback logic.
+Trace/debug data is for parser audit only and should not be needed by writer.py.
+```
+
+Implementation direction started this session:
+
+```text
+reader.py should expose:
+  build_trace_middle_layer(doc)  -> full debug/trace view
+  to_idf_middle_layer(trace)     -> clean writer view from same parsed data
+  build_idf_middle_layer(doc)    -> parse once and return clean IDF view
+
+run.py should save both per-building files:
+  middle_layer_trace_<building>.json
+  middle_layer_idf_<building>.json
+
+writer.py should use the IDF middle layer when run directly.
+```
+
+### Implementation Completed In Same Session
+
+Files changed:
+
+```text
+citygml2idf/model/reader.py
+citygml2idf/run.py
+citygml2idf/write/writer.py
+SESSION_HANDOFF.md
+```
+
+Implemented:
+
+```text
+reader.py:
+  build_trace_middle_layer(doc)
+    full parser/debug view; equivalent to old rich middle layer.
+
+  to_idf_middle_layer(trace_middle)
+    strips parser/debug fields and keeps only writer-needed EnergyPlus-ready data.
+
+  build_idf_middle_layer(doc)
+    parse once and return the clean writer view.
+
+  build_both_middle_layers(doc)
+    parse once and return (trace_middle, idf_middle).
+
+  build_middle_layer(doc)
+    kept as backward-compatible alias for the trace/full view.
+```
+
+```text
+run.py:
+  now builds both views from the same parser run.
+  per building run folder now writes:
+    middle_layer_trace_<building>.json
+    middle_layer_idf_<building>.json
+    middle_layer_<building>.json  # legacy alias for trace view
+  writer receives the IDF middle layer only.
+```
+
+```text
+writer.py:
+  direct writer execution now calls build_idf_middle_layer(doc).
+  EnergyPlus template path fixed from root/templates to citygml2idf/templates.
+```
+
+Verification:
+
+```text
+python -m py_compile citygml2idf/model/reader.py citygml2idf/run.py citygml2idf/write/writer.py
+  passed
+
+python -m citygml2idf.run --stage 1z-nowin --building id_building_11 Alderaan_Energy_ADE_All.gml
+  produced both middle layers
+  EnergyPlus launched successfully after IDD path fix
+  exit=0
+  remaining Severe: warmup convergence for ID_BUILDING_11_ZONE
+```
+
+Output checked:
+
+```text
+citygml2idf/output/runs/id_building_11__1Z_noWin/middle_layer_trace_id_building_11.json
+  view=trace
+  includes construction_trace and raw_citygml parser evidence
+
+citygml2idf/output/runs/id_building_11__1Z_noWin/middle_layer_idf_id_building_11.json
+  view=idf
+  contains only clean writer fields
+  confirmed absent:
+    construction_trace
+    raw_citygml
+    fallback_reason
+    candidate_owners_checked
+    converted
+```
+
+Next caution:
+
+```text
+The writer path is now modular, but the id_building_11 EnergyPlus run still has a warmup convergence Severe.
+That is an EnergyPlus/simulation-quality issue to inspect later, not a middle-layer split failure.
+```

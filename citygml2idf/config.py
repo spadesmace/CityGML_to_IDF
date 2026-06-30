@@ -1,6 +1,7 @@
 """
 config.py — global TEST flags for the step-by-step testing architecture
-(see RULES_code.md §F). The parser is ALWAYS full and robust; these flags only
+(the staged testing ladder is logged in process.md; the EnergyPlus rules these
+stages verify are in EPLUS_RULES.md). The parser is ALWAYS full and robust; these flags only
 GATE which path runs for a given test stage — they are scaffolding, not logic.
 
 REAL-WORLD / PRODUCTION values:

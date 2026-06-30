@@ -6,6 +6,7 @@ __pycache__/
 citygml2idf/output/
 citygml2idf/output2/
 citygml2idf/output3/
+citygml2idf/test_outputs/
 
 # Local EnergyPlus and FMU installations are kept outside Git.
 citygml2idf/templates/EnergyPlus-*/
