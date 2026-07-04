@@ -2,6 +2,142 @@
 
 Date: 2026-06-26
 
+## 2026-07-04 — surface_types.py: schema-grounded coverage expansion
+
+Handled several previously-commented boundary-surface types, EACH decided from the XSD/spec
+(`validation_file/.../building.xsd` + CityGML 2.0 OGC 12-019), never guessed on the fly.
+
+- **OuterFloorSurface / OuterCeilingSurface** (CityGML 2.0, LoD2-4) — ACTIVATED. The E+ `Surface_Type`
+  follows the OUTWARD NORMAL (same rule as `classify.py`), which **inverts** the CityGML name (the name
+  is the outdoor space's view, the E+ type is the enclosed zone's view):
+  - `OuterFloorSurface`  — spec: normal **UP** (a loggia floor)      → exposed **TOP** of the zone below → **Roof**, Outdoors.
+  - `OuterCeilingSurface`— spec: normal **DOWN** (a soffit/overhang) → exposed **FLOOR** of the zone above → **Floor**, Outdoors.
+  - The old suggestion-comments had these **backwards** — the spec fixed them. (Exactly why we ground in the schema.)
+- **LoD4 room-INTERIOR trio** (`FloorSurface`, `CeilingSurface`, `InteriorWallSurface`) — ACTIVATED as
+  generic-adiabatic, the same treatment as the ADE interfaces (`FloorOrCeiling`/`Wall` + `Adiabatic`
+  default; `zones.py` overrides to `Surface` when two modelled zones share the face).
+- **Unknown / unmapped labeled type** — no longer DROPPED. `building_surfaces.process_surfaces` now keeps
+  it and **classifies it by the outward normal** (like the LoD1 path) instead of skipping (our old
+  behaviour) or blind-guessing "wall" (the prof's default). Honours BOTH golden-rule halves: never drop
+  geometry, never guess by name. `zones.py` still fixes interzone boundaries.
+- **ClosureSurface** — DEFERRED, in an explicit `surface_types.SKIP_TYPES` (deliberately dropped, NOT
+  geometry-classified). WHY not emitted: E+ `BuildingSurface:Detailed` REQUIRES a `Construction_Name`
+  (IDD field A3), but a ClosureSurface is VIRTUAL (no material), so emitting it would force INVENTING a
+  dummy construction — a golden-rule violation. Revisit only if a real file's zone won't close without it
+  (then decide a default adiabatic construction).
+
+Prof comparison (`piotre13/CityGML2Eplus` `parse_gml.py`): his `mapping` has 8 types, collapses all
+interior surfaces to one adiabatic bucket, maps `ClosureSurface`→adiabatic (kept), and defaults unknown
+→ `wall`. We now cover MORE (the ADE interfaces + Outer*), and handle unknowns by GEOMETRY (stronger than
+his blind "wall").
+
+**Alderaan inventory** (what the sample actually contains): `WallSurface` 94, `RoofSurface` 48,
+`PartyWallSurface` 24, `GroundSurface` 23, `IntermediateFloorSurface` 2, `BasementCeilingSurface` 1 — all
+already covered; the newly-activated types do NOT appear, so activating them is pure future-proofing.
+**Verified:** py_compile OK; Alderaan envelope byte-identical; a synthetic test confirms unmapped→kept
+(classified roof by geometry) and `ClosureSurface`→skipped.
+
+## 2026-07-04 — Readability refactor (eppy KEPT) + the >4-vertex wall fix (`_vertex_fields`)
+
+Goal this session: make the code **readable without downgrading** coverage/correctness. Decision up
+front: **keep eppy** (its IDD validation is our safety net — do NOT switch to raw-text IDF writing),
+keep the two-view middle layer (trace dict + idf), keep all coverage. Every change below was verified
+behaviour-preserving (byte-/object-identical IDFs).
+
+**Readability, step by step (each verified against the pre-change output):**
+- **Split `model/constructions.py`** (one ~770-line file) into single-responsibility modules:
+  `units.py` (value coercion + unit conversion), `citygml_read.py` (typed GML child readers),
+  `materials.py` (the 3 E+ material builders + `DEFAULT_MATERIAL`), `catalogue.py` (Excel DB + in-file
+  library + `(codeSpace,code)` matching). `constructions.py` is now the thin resolver + the 4-tier
+  waterfall, and **re-exports** the names `openings.py`/`zones.py`/`reader.py` import, so those are
+  untouched. Verified: construction/material dump byte-identical (only a cosmetic warn wording changed).
+- **Typed the IDF middle layer** (the writer contract): new `model/idf_model.py` with dataclasses
+  `IdfModel / IdfBuilding / IdfZone / IdfSurface / IdfWindow / IdfConstruction / IdfMaterial /
+  WindowConstruction`, each with `to_jsonable()` that reproduces the OLD JSON exactly, plus
+  `IdfModel.subset_for_building()`. `reader.to_idf_middle_layer` now builds these; `writer.py` reads
+  `surface.surface_type` instead of `surface["surface_type"]`; `run.py` uses the typed view (the
+  visualizer still gets a dict via `to_jsonable()`). **Trace view stays a dict.** Verified: IDF objects
+  identical, idf JSON semantically identical, full `run.py` end-to-end `exit=0`.
+- **Named the 3 surface-source paths** (`semantics/building_surfaces.py`). Split the tangled
+  `surfaces_of_building` into: a `SurfacePath` Enum (`ENERGY_ADE_BOUNDARIES` / `CITYGML_BUILDING_SHELL`
+  / `RAW_SOLID_FALLBACK` / `NONE`), `select_surface_path()` (the most-detailed-first cascade, one clean
+  early-return each), and a PURE `process_surfaces()` (orient + classify, no XML). Mirrors the prof's
+  rich/poor/coincides naming — *coincides folds into SHELL, it is not a 4th path*. The chosen path is
+  now recorded per building in the **trace** (`building['surface_path']`) for audit. Verified: same
+  envelope areas, idf view semantically identical, all 22 IDFs object-identical.
+- **LoD0 / empty-building fix.** Before, a building with no usable envelope produced a Zone with **no
+  surfaces → EnergyPlus Severe**. Now `select_surface_path` returns `NONE`, the building is **kept in
+  the trace** (with `surface_path='none'` + a warning) but **dropped from the idf view**
+  (`reader.to_idf_middle_layer` skips surface-less buildings), so the writer never emits a broken IDF.
+  "Read it for the audit, skip building it." (Alderaan has none, so behaviour there is unchanged.)
+
+**Coverage fix — `write/writer.py` `_vertex_fields` (WHY it exists — remember this):**
+- **Problem.** A wall/roof/floor can have MORE than 4 corners (L-shaped / angled → 5, 6, …). EnergyPlus
+  ALLOWS this: `BuildingSurface:Detailed` is `\extensible:3` in `Energy+.idd` (up to 120 vertices;
+  BigLadder I/O Reference v23.1 confirms — "shown with 120 vertex coordinates, extensible, duplicate the
+  last x,y,z set"). But our writer created the surface then added vertices ONE AT A TIME via
+  `setattr(obj, "Vertex_5_Xcoordinate", …)`, and **eppy** only materialises ~4 vertex fields on a fresh
+  object → `BadEPFieldError: Vertex_5` → the building produced NO IDF. This is an **eppy quirk, not an E+
+  limit**, and it blocked **10 of 22** Alderaan buildings (the complex LoD3 ones).
+- **Fix.** `_vertex_fields(points)` builds ALL vertex coordinates into a kwargs dict and passes them to
+  `newidfobject(...)` **at creation** (not setattr afterwards). eppy then sizes the object correctly, so
+  any N ≤ 120 vertices build. **Keeps eppy + its IDD validation — no raw-text rewrite.** (This is the one
+  trap the prof's raw-text writer sidesteps for free; we get the same result while keeping validation.)
+- **Verified.** No-window stages now build **22/22** (was 12/22). EnergyPlus runs a 5-vertex-wall
+  building `exit=0`, 0 severe. The 12 previously-building IDFs are byte-unchanged. The generated IDF is
+  the standard `Number of Vertices, then N × (x,y,z)` layout — identical to what raw-text would emit.
+
+**Parked — WINDOWS (`model/openings.py` NOT yet improved):**
+- `FenestrationSurface:Detailed` (windows) is capped at **4 vertices by EnergyPlus itself** — a REAL E+
+  rule, not an eppy quirk. Some LoD3 Alderaan windows have 5 vertices → the *with-window* stages still
+  fail on those (walls are fixed).
+- **TODO when we start the windows work:** add **quad simplification** in `openings.py` — reduce any
+  >4-vertex opening to a 4-corner quad (the prof's `simplify_to_quad`), THEN the with-window stages reach
+  22/22. Fold this into the parked windows work (LoD1 `glazingRatio` rung + `gValue↔SHGC` study). Do NOT
+  do it before we actually start on windows.
+
+## 2026-07-03 — Construction/material resolution: the 4-TIER waterfall (meeting decision)
+
+After the professor meeting, construction & material resolution is a strict **most-detailed-first
+waterfall**; the external code/Excel is the LAST fallback, never first:
+
+- **TIER 1 — CityGML DETAILED layers.** The construction's own inline `nrg:layer`, OR an in-file
+  `LayeredConstructionLibrary` member (reached by xlink OR by the `(codeSpace, code)` pair).
+- **TIER 2 — CityGML AVERAGED value.** No layers, only `nrg:uValue` → `Material:NoMass` (R = 1/U).
+  The typical LoD1 hull case (the "single averaged U/g for the whole hull" picture).
+- **TIER 3 — EXTERNAL Excel/DB code.** `(codeSpace, code)` → `construction_db.xlsx`. This is the
+  PLACEHOLDER for the archetype (TABULA / UBEM-CARDs) database. LAST fallback, only when the CityGML
+  gave nothing. Raw data always beats a code. **The archetype logic itself is DEFERRED** ("build the
+  raw converter first; add archetypes last"). When built it is keyed by a CityGML building field
+  (`bldg:yearOfConstruction` + `bldg:function/usage`, + `nrg3:bdgType`) — first confirm which ADE field
+  carries the archetype. We do NOT invent the numbers; the DB is TABULA/UBEM-CARDs (teammate builds it).
+- **TIER 4 — DEFAULT** construction.
+
+**Done this session (`model/constructions.py`, `input/construction_db.xlsx`):**
+- **Reordered** `_resolve_surface` from Excel-FIRST to the tier order above (Excel is now Tier 3; two
+  passes — all owners' CityGML data first, then Excel). Fixes a real bug: Excel-first was *overriding*
+  Alderaan `wall_2`'s real inline layers with our Excel placeholder — exactly what the prof said not to
+  do. `code_2` now resolves from the file's own layers (Tier 1).
+- Excel matching keyed by the `(codeSpace, code)` PAIR (from the ADE schema) with a **required**
+  `code_space` column; every row now declares a codeSpace (no confusing blanks). The Excel is a
+  swappable placeholder (`SHEET_NAMES`/`COLUMN_MAP`), kept but dormant for files that carry their own
+  data. **No config flag** — a file with its own CityGML data never reaches Tier 3.
+
+**Related decisions parked (same meeting):**
+- **Windows LoD1** — read `glazingRatio` (+ `gValue`) as the Tier-2 glazing rung (not yet built);
+  `gValue↔SHGC` to be studied WITH the prof. LoD2 (WWR/areas) + LoD3 (explicit) already work.
+- **Neighbourhood/adjacency** — NOT our step. Trust the CityGML surface types (party wall → Adiabatic)
+  + `bdgBdrySurfIsAdiabatic`; teammate Ali enriches the CityGML upstream.
+- **BuildingParts** — prof wants SEPARATE IDFs named `partA_/partB_<building>` (parts can differ in
+  construction/HVAC). We currently MERGE parts into one IDF — deferred; reconcile later.
+- **Multi-polygon surface split** — disabled; we assume single-polygon surfaces (like Alderaan).
+- **Geometry** — outward normal is convex-only (centroid heuristic); concave (L/U) flips inner walls
+  (known gap — see COVERAGE.md).
+
+Reference repos from the prof: `piotre13/CityGML2Eplus` (simpler reference; its construction fallback is
+already layered → U-value → archetype, adjacency is a decoupled preprocessor) and `piotre13/Eplus_graph`
+(IDF object-relations visualizer).
+
 ## Current Goal
 
 We are improving the `citygml2idf` pipeline so it can parse valid CityGML 2.0 plus Energy ADE 3.0 files in a robust, schema-first way, then write EnergyPlus IDF without splitting the code into separate "test" and "real" pipelines.

@@ -109,25 +109,25 @@ def _write_json(path, payload):
 
 def run_building(building, trace_middle, idf_middle, stage_tag):
     """Build the IDF + run EnergyPlus for one clean-IDF building view."""
-    building_id = building["id"]
+    building_id = building.id
     run_directory = os.path.join(RUNS_DIR, f"{building_id}__{stage_tag}")
     os.makedirs(run_directory, exist_ok=True)
 
-    trace_one = single_building_middle_layer(trace_middle, building_id)
-    idf_one = single_building_middle_layer(idf_middle, building_id)
+    trace_one = single_building_middle_layer(trace_middle, building_id)   # trace view: dict
+    idf_one = idf_middle.subset_for_building(building_id)                 # idf view: IdfModel
 
     trace_path = os.path.join(run_directory, f"middle_layer_trace_{building_id}.json")
     idf_middle_path = os.path.join(run_directory, f"middle_layer_idf_{building_id}.json")
     _write_json(trace_path, trace_one)
-    _write_json(idf_middle_path, idf_one)
+    _write_json(idf_middle_path, idf_one.to_jsonable())
 
-    preview_path = preview_building(building, run_directory)
+    preview_path = preview_building(building.to_jsonable(), run_directory)  # visualizer reads a dict
 
     idf_path = writer.build_idf(
         building,
-        idf_middle["constructions"],
-        idf_middle["materials"],
-        idf_middle.get("window_construction"),
+        idf_middle.constructions,
+        idf_middle.materials,
+        idf_middle.window_construction,
         out_dir=run_directory,
     )
     return_code, error_text = writer.run_energyplus(idf_path, out_dir=run_directory)
@@ -135,9 +135,9 @@ def run_building(building, trace_middle, idf_middle, stage_tag):
     severe_lines = [line for line in error_text.splitlines()
                     if "** Severe" in line or "** Fatal" in line]
     warning_count = sum(1 for line in error_text.splitlines() if "** Warning" in line)
-    window_count = sum(len(surface.get("windows", [])) for surface in building.get("surfaces", []))
+    window_count = sum(len(surface.windows) for surface in building.surfaces)
     status = "OK" if (return_code == 0 and not severe_lines) else f"{len(severe_lines)} SEVERE/FATAL"
-    print(f"  {building_id:<12} surfaces={len(building.get('surfaces', [])):>2}  windows={window_count}"
+    print(f"  {building_id:<12} surfaces={len(building.surfaces):>2}  windows={window_count}"
           f"  exit={return_code}  warnings={warning_count}  {status}")
     if preview_path:
         print(f"       preview={os.path.basename(preview_path)}")
@@ -155,14 +155,14 @@ def main(building_id=None, path=None, stage=None, default_wwr=None):
           f"ENABLE_WINDOWS={config.ENABLE_WINDOWS}  DEFAULT_WWR={config.DEFAULT_WWR}  -> '{stage_tag}'")
     doc = xml_io.CityGMLDoc(path or xml_io.DEFAULT_INPUT)
     trace_middle, idf_middle = build_both_middle_layers(doc)
-    target_buildings = [building for building in idf_middle["buildings"]
-                        if building_id is None or building["id"] == building_id]
+    target_buildings = [building for building in idf_middle.buildings
+                        if building_id is None or building.id == building_id]
     if not target_buildings:
-        available_ids = [building["id"] for building in idf_middle["buildings"]]
+        available_ids = [building.id for building in idf_middle.buildings]
         print(f"No building '{building_id}'. Available: {available_ids}")
         return
 
-    print(f"Building(s): {[building['id'] for building in target_buildings]}"
+    print(f"Building(s): {[building.id for building in target_buildings]}"
           f"  -> output/runs/<id>__{stage_tag}/")
     for building in target_buildings:
         run_building(building, trace_middle, idf_middle, stage_tag)

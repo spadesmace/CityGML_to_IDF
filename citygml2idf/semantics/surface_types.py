@@ -36,12 +36,7 @@ from collections import namedtuple
 SurfaceRule = namedtuple("SurfaceRule", ["role", "surface_type", "boundary"])
 
 # --- EnergyPlus 23.1 allowed keywords, verbatim from templates/Energy+.idd ------
-# BuildingSurface:Detailed > Surface Type (field A2) — the ONLY four E+ accepts:
 EPLUS_SURFACE_TYPES = ("Floor", "Wall", "Ceiling", "Roof")
-# NOTE: "FloorOrCeiling" used in SURFACE_TYPES below is NOT a 5th keyword — it is an
-# internal placeholder, resolved to one of these four ("Floor"/"Ceiling") by
-# resolve_floor_ceiling() in building_surfaces.py BEFORE the middle layer.
-
 # BuildingSurface:Detailed > Outside Boundary Condition — the FULL allowed list (kept
 # for reference); the comment below says which ones THIS pipeline actually emits.
 EPLUS_BOUNDARY_CONDITIONS = (
@@ -66,31 +61,49 @@ SURFACE_TYPES = {
     "RoofSurface":   SurfaceRule("roof",   "Roof",  "Outdoors"),
     "GroundSurface": SurfaceRule("ground", "Floor", "Ground"),
 
+    # OuterFloor / OuterCeiling — horizontal OUTER-SHELL surfaces exposed to open air
+    # Source: CityGML 2.0 (OGC 12-019) OuterFloorSurface / OuterCeilingSurface definitions.
+    "OuterFloorSurface":   SurfaceRule("outer_floor",   "Roof",  "Outdoors"),
+    "OuterCeilingSurface": SurfaceRule("outer_ceiling", "Floor", "Outdoors"),
+
     # ---- Energy ADE 3.0 (nrg3:) interior interfaces ---------------------------
     # The "Adiabatic" below is only the DEFAULT (used when a single zone owns the
     # face, or it faces another building). When TWO modelled zones share the face,
-    # model/zones.py overrides it to "Surface" + a reciprocal partner (G12, now
-    # IMPLEMENTED). The TYPE here still sets Surface_Type (Wall, or Floor/Ceiling
-    # by normal); the ZONE COUNT sets the boundary at runtime.
+    # model/zones.py overrides it to "Surface" + a reciprocal partne
+    # The TYPE here still sets Surface_Type (Wall, or Floor/Ceiling
+    # by normal)and will use  resolve_floor_ceiling(); the ZONE COUNT sets the boundary at runtime.
     "PartyWallSurface":         SurfaceRule("party_wall",        "Wall",          "Adiabatic"),
     "IntermediateFloorSurface": SurfaceRule("intermediate_floor","FloorOrCeiling","Adiabatic"),
     "AtticFloorSurface":        SurfaceRule("attic_floor",       "FloorOrCeiling","Adiabatic"),
     "BasementCeilingSurface":   SurfaceRule("basement_ceiling",  "FloorOrCeiling","Adiabatic"),
 
+    # ---- CityGML 2.0 (bldg:) LoD4 room-INTERIOR surfaces ----------------------
+    # Same generic-adiabatic treatment as the ADE interfaces above: they bound ONE
+    # conditioned volume, so the DEFAULT boundary is Adiabatic; when two modelled
+    # zones share the face, zones.py overrides it to "Surface" (interzone pair).
+    # Horizontal -> FloorOrCeiling (resolved by the normal); vertical -> Wall.
+    "FloorSurface":        SurfaceRule("interior_floor",   "FloorOrCeiling", "Adiabatic"),  # interior floor between storeys
+    "CeilingSurface":      SurfaceRule("interior_ceiling", "FloorOrCeiling", "Adiabatic"),  # interior ceiling between storeys
+    "InteriorWallSurface": SurfaceRule("interior_wall",    "Wall",           "Adiabatic"),  # interior partition wall
+
     # ===========================================================================
-    # NOT DECIDED YET — named so we return HERE; uncomment + fill (role,
-    # Surface_Type, boundary) when we handle each. The trailing note is a
-    # SUGGESTION only, not a decision. Never resolve these inside the logic.
-    # ---------------------------------------------------------------------------
-    # CityGML 2.0 (bldg:)
-    # "OuterFloorSurface":   SurfaceRule("outer_floor",   "Floor",   "Outdoors"),   # floor exposed to air (overhang underside)
-    # "OuterCeilingSurface": SurfaceRule("outer_ceiling", "Roof",    "Outdoors"),   # soffit exposed to air; geometrically faces down
-    # "FloorSurface":        SurfaceRule("interior_floor","FloorOrCeiling","Adiabatic"),  # interior floor, not on the ground
-    # "CeilingSurface":      SurfaceRule("interior_ceiling","FloorOrCeiling","Adiabatic"),# interior ceiling between storeys
-    # "InteriorWallSurface": SurfaceRule("interior_wall", "Wall",    "Adiabatic"),   # partition inside one zone = internal mass? vs interzone
-    # "ClosureSurface":      SurfaceRule( ... ),  # VIRTUAL face closing an open volume — likely SKIP (no construction, no heat transfer)
+    # DEFERRED — ClosureSurface: a VIRTUAL face that only CLOSES an open volume (the
+    # open side of a loggia, the top of a courtyard). It has NO real material. But E+
+    # BuildingSurface:Detailed REQUIRES a Construction_Name (IDD field A3), so emitting
+    # it would force us to INVENT a dummy construction — which the golden rule forbids.
+    # So it is listed in SKIP_TYPES below — DELIBERATELY dropped, NOT geometry-classified
+    # like a genuinely-unmapped label. Revisit only if a real file needs it to close a
+    # zone (then a default adiabatic construction is the decision to make).
+    
+    # "ClosureSurface":      SurfaceRule( ... ),  # needs a decision + a default construction
     # ===========================================================================
 }
+
+
+# Types we DELIBERATELY do not emit. A ClosureSurface is a VIRTUAL face (no material,
+# no heat transfer) — a DECIDED skip, not an "unknown" type. The reader drops it rather
+# than geometry-classifying it the way it keeps a genuinely unmapped label.
+SKIP_TYPES = frozenset({"ClosureSurface"})
 
 
 # For the LOD1 fallback: geometry.classify returns a generic ROLE ("wall" /

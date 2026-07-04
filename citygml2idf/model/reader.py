@@ -29,6 +29,8 @@ from ..semantics import building_surfaces
 from . import constructions
 from . import openings
 from . import zones
+from .idf_model import (IdfBuilding, IdfConstruction, IdfMaterial, IdfModel,
+                        IdfSurface, IdfWindow, IdfZone, WindowConstruction)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PKG = os.path.dirname(_HERE)                       # citygml2idf/
@@ -45,8 +47,9 @@ def build_trace_middle_layer(doc):
     # 1. geometry + roles per building (points still in the file's CRS)
     buildings = []
     for b in xml_io.buildings(doc):
-        lod_n, surfaces = building_surfaces.surfaces_of_building(doc, b)
-        buildings.append({"id": b.get(GML_ID), "lod": lod_n, "surfaces": surfaces})
+        lod_n, surface_path, surfaces = building_surfaces.surfaces_of_building(doc, b)
+        buildings.append({"id": b.get(GML_ID), "lod": lod_n,
+                          "surface_path": surface_path.value, "surfaces": surfaces})
 
     # 2. reproject to metres only if the CRS is geographic (no-op when already projected)
     src_epsg = crs.parse_epsg(xml_io.srs_name(doc))
@@ -98,61 +101,77 @@ def build_middle_layer(doc):
     return build_trace_middle_layer(doc)
 
 
-def _copy_keys(src, keys):
-    return {key: copy.deepcopy(src[key]) for key in keys if key in src}
-
-
 def _surface_for_idf(surface):
-    """Strip a parsed surface down to fields writer.py needs for IDF objects."""
-    clean = _copy_keys(surface, [
-        "source_id", "surface_type", "boundary", "construction", "zone",
-        "boundary_object", "points",
-    ])
-    if surface.get("windows"):
-        clean["windows"] = [_copy_keys(window, ["source_id", "points"])
-                            for window in surface["windows"]]
-    return clean
+    """One typed IdfSurface: only the fields writer.py needs for IDF objects."""
+    windows = [IdfWindow(source_id=window["source_id"], points=copy.deepcopy(window["points"]))
+               for window in (surface.get("windows") or [])]
+    return IdfSurface(
+        source_id=surface["source_id"],
+        surface_type=surface["surface_type"],
+        boundary=surface["boundary"],
+        construction=surface["construction"],
+        zone=surface.get("zone", ""),
+        boundary_object=surface.get("boundary_object", ""),
+        points=copy.deepcopy(surface["points"]),
+        windows=windows,
+    )
 
 
 def _building_for_idf(building):
-    clean = _copy_keys(building, ["id", "zones"])
-    clean["surfaces"] = [_surface_for_idf(surface) for surface in building.get("surfaces", [])]
-    return clean
+    """One typed IdfBuilding: its zones + cleaned surfaces."""
+    zones = [IdfZone(name=zone["name"], volume=zone.get("volume"))
+             for zone in building.get("zones", [])]
+    surfaces = [_surface_for_idf(surface) for surface in building.get("surfaces", [])]
+    return IdfBuilding(id=building["id"], zones=zones, surfaces=surfaces)
 
 
 def _construction_for_idf(construction):
-    """Construction writer contract: layer names and source layer order only."""
-    return _copy_keys(construction, ["layers", "layer_order"])
+    """One typed IdfConstruction: layer names and source layer order only."""
+    return IdfConstruction(layers=list(construction.get("layers", [])),
+                           layer_order=construction.get("layer_order"))
 
 
 def _material_for_idf(material):
-    """Material writer contract for Material / NoMass / AirGap objects."""
-    eplus_type = material.get("eplus")
-    if eplus_type == "Material:AirGap":
-        keys = ["name", "eplus", "thermal_resistance"]
-    elif eplus_type == "Material:NoMass":
-        keys = ["name", "eplus", "roughness", "thermal_resistance"]
-    else:
-        keys = ["name", "eplus", "roughness", "thickness", "conductivity",
-                "density", "specific_heat"]
-    return _copy_keys(material, keys)
+    """One typed IdfMaterial (only the fields its `eplus` object needs are set)."""
+    return IdfMaterial(
+        name=material["name"],
+        eplus=material.get("eplus"),
+        roughness=material.get("roughness"),
+        thickness=material.get("thickness"),
+        conductivity=material.get("conductivity"),
+        density=material.get("density"),
+        specific_heat=material.get("specific_heat"),
+        thermal_resistance=material.get("thermal_resistance"),
+    )
 
 
 def _window_construction_for_idf(window_construction):
     if not window_construction:
         return None
-    return _copy_keys(window_construction, ["name", "u_factor", "shgc"])
+    return WindowConstruction(name=window_construction["name"],
+                              u_factor=window_construction["u_factor"],
+                              shgc=window_construction["shgc"])
 
 
 def to_idf_middle_layer(trace_middle):
-    """Return a clean EnergyPlus writer view from the trace middle layer."""
-    buildings = [_building_for_idf(building) for building in trace_middle.get("buildings", [])]
+    """Return the clean, TYPED EnergyPlus writer view (IdfModel) from the trace view.
+
+    Buildings with no usable surfaces (e.g. LoD0, surface_path='none') are KEPT in the
+    trace view but dropped here, so the writer never emits a zone-with-no-surfaces IDF.
+    """
+    buildings = []
+    for building in trace_middle.get("buildings", []):
+        if not building.get("surfaces"):
+            xml_io.warn(f"building {building.get('id')}: no surfaces "
+                        f"(surface_path={building.get('surface_path')}); skipped from IDF output")
+            continue
+        buildings.append(_building_for_idf(building))
 
     construction_names = {
-        surface.get("construction")
+        surface.construction
         for building in buildings
-        for surface in building.get("surfaces", [])
-        if surface.get("construction")
+        for surface in building.surfaces
+        if surface.construction
     }
     constructions_used = {
         name: _construction_for_idf(trace_middle["constructions"][name])
@@ -162,7 +181,7 @@ def to_idf_middle_layer(trace_middle):
     material_names = {
         material
         for construction in constructions_used.values()
-        for material in construction.get("layers", [])
+        for material in construction.layers
     }
     materials_used = {
         name: _material_for_idf(trace_middle["materials"][name])
@@ -170,14 +189,14 @@ def to_idf_middle_layer(trace_middle):
         if name in trace_middle.get("materials", {})
     }
 
-    return {
-        "view": "idf",
-        "crs": copy.deepcopy(trace_middle.get("crs", {})),
-        "buildings": buildings,
-        "constructions": constructions_used,
-        "materials": materials_used,
-        "window_construction": _window_construction_for_idf(trace_middle.get("window_construction")),
-    }
+    return IdfModel(
+        view="idf",
+        crs=copy.deepcopy(trace_middle.get("crs", {})),
+        buildings=buildings,
+        constructions=constructions_used,
+        materials=materials_used,
+        window_construction=_window_construction_for_idf(trace_middle.get("window_construction")),
+    )
 
 
 def build_both_middle_layers(doc):
@@ -201,8 +220,9 @@ def write_middle_layer(doc, out_path=None, view="trace"):
         raise ValueError("view must be 'trace' or 'idf'")
     out_path = out_path or os.path.join(OUTPUT_DIR, f"middle_layer_{view}.json")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    payload = middle.to_jsonable() if isinstance(middle, IdfModel) else middle
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(middle, f, indent=2)
+        json.dump(payload, f, indent=2)
     return middle, out_path
 
 
@@ -215,7 +235,7 @@ def _demo(path=None):
     with open(trace_path, "w", encoding="utf-8") as f:
         json.dump(trace_middle, f, indent=2)
     with open(idf_path, "w", encoding="utf-8") as f:
-        json.dump(idf_middle, f, indent=2)
+        json.dump(idf_middle.to_jsonable(), f, indent=2)
 
     c = trace_middle["crs"]
     print(f"CRS: {c['srsName']}  epsg={c['epsg']}  reprojected={c['reprojected']}")

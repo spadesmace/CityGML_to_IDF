@@ -115,6 +115,7 @@ class CityGMLDoc:
         """Qualified name using THIS document's resolved namespaces."""
         return qualified_name(prefix, local, self.ns)
 
+    #Building under cityObjectMember and a Building under CityObjectGroup > groupMember are found identically
     def iter_type(self, prefix, local):
         """Every element of a qualified type, anywhere in the tree (a generator)."""
         return self.root.iter(self.qualified_name(prefix, local))
@@ -173,7 +174,7 @@ class CityGMLDoc:
 
 
 # === geometry-text helpers (still pure XML, no math yet) =====================
-
+#  finds every bldg:Building anywhere in the tree 
 def buildings(doc):
     """Every bldg:Building in the file (entry point for the readers)."""
     return list(doc.iter_type("bldg", "Building"))

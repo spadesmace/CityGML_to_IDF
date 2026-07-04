@@ -26,6 +26,7 @@ from eppy.modeleditor import IDF
 
 from ..citygml import xml_io
 from ..semantics.surface_types import sun_wind_exposure
+from ..model.idf_model import IdfZone
 from ..model.reader import build_idf_middle_layer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -135,23 +136,23 @@ def new_empty_idf(with_weather=False):
 def add_materials(idf, materials):
     """Emit one of the 3 E+ material objects per material, by its `eplus` type (M1)."""
     for m in materials.values():
-        if m["eplus"] == "Material:AirGap":
-            idf.newidfobject("MATERIAL:AIRGAP", Name=m["name"],
-                             Thermal_Resistance=m["thermal_resistance"])
-        elif m["eplus"] == "Material:NoMass":
-            idf.newidfobject("MATERIAL:NOMASS", Name=m["name"], Roughness=m["roughness"],
-                             Thermal_Resistance=m["thermal_resistance"])
+        if m.eplus == "Material:AirGap":
+            idf.newidfobject("MATERIAL:AIRGAP", Name=m.name,
+                             Thermal_Resistance=m.thermal_resistance)
+        elif m.eplus == "Material:NoMass":
+            idf.newidfobject("MATERIAL:NOMASS", Name=m.name, Roughness=m.roughness,
+                             Thermal_Resistance=m.thermal_resistance)
         else:
-            idf.newidfobject("MATERIAL", Name=m["name"], Roughness=m["roughness"],
-                             Thickness=m["thickness"], Conductivity=m["conductivity"],
-                             Density=m["density"], Specific_Heat=m["specific_heat"],
+            idf.newidfobject("MATERIAL", Name=m.name, Roughness=m.roughness,
+                             Thickness=m.thickness, Conductivity=m.conductivity,
+                             Density=m.density, Specific_Heat=m.specific_heat,
                              Thermal_Absorptance=0.9, Solar_Absorptance=0.7, Visible_Absorptance=0.7) # IDD default
 
 
 def _energyplus_layers(construction):
     """Middle layer stores ADE order; EnergyPlus wants outside-to-inside."""
-    layers = list(construction["layers"])
-    if construction.get("layer_order") == "inside_to_outside":
+    layers = list(construction.layers)
+    if construction.layer_order == "inside_to_outside":
         return list(reversed(layers))
     return layers
 
@@ -159,7 +160,7 @@ def _energyplus_layers(construction):
 def add_constructions(idf, constructions):
     """Emit each Construction in EnergyPlus outside-to-inside layer order."""
     for name, c in constructions.items():
-        if not c["layers"]:
+        if not c.layers:
             continue
         layers = _energyplus_layers(c)
         obj = idf.newidfobject("CONSTRUCTION", Name=name)
@@ -168,41 +169,55 @@ def add_constructions(idf, constructions):
             setattr(obj, f"Layer_{i}", mat)
 
 
+def _vertex_fields(points): #  just gathers all the corners into one bundle and hands them to eppy all at once, when the wall is first created.
+    r"""Vertex coordinates as newidfobject() kwargs: {Vertex_1_Xcoordinate: x, ...}.
+
+    WHY we pass vertices at CREATION and not with setattr afterwards:
+    EnergyPlus accepts a face with ANY number of vertices — BuildingSurface:Detailed
+    But eppy only materialises a freshly-created object's vertex fields up to ~4
+    """
+    fields = {}
+    for index, (vertex_x, vertex_y, vertex_z) in enumerate(points, start=1):
+        fields[f"Vertex_{index}_Xcoordinate"] = round(vertex_x, 6)
+        fields[f"Vertex_{index}_Ycoordinate"] = round(vertex_y, 6)
+        fields[f"Vertex_{index}_Zcoordinate"] = round(vertex_z, 6)
+    return fields
+
+
 def add_building(idf, building):
     """One E+ Zone per building['zones'] (zones.py / G12-G13), then one
     BuildingSurface:Detailed per surface placed in its surface['zone'] with the boundary
     zones.py decided (interzone -> explicit reciprocal Surface pair with A6=Surface
     and A7 pointing to the partner surface).
     Falls back to a single implicit zone if 'zones' is absent."""
-    zone_list = building.get("zones") or [{"name": f"{building['id']}_Zone", "volume": None}]
+    zone_list = building.zones or [IdfZone(f"{building.id}_Zone", None)]
     for zone in zone_list:
-        idf.newidfobject("ZONE", Name=zone["name"], Multiplier=1, Ceiling_Height="autocalculate",
-                         Volume=zone["volume"] if zone.get("volume") else "autocalculate")
-    default_zone = zone_list[0]["name"]
-    for surface in building["surfaces"]:
-        boundary = surface["boundary"]
+        idf.newidfobject("ZONE", Name=zone.name, Multiplier=1, Ceiling_Height="autocalculate",
+                         Volume=zone.volume if zone.volume else "autocalculate")
+    default_zone = zone_list[0].name
+    for surface in building.surfaces:
+        boundary = surface.boundary
         sun, wind = sun_wind_exposure(boundary)
-        detailed = idf.newidfobject(
-            "BUILDINGSURFACE:DETAILED", Name=surface["source_id"], Surface_Type=surface["surface_type"],
-            Construction_Name=surface["construction"], Zone_Name=surface.get("zone", default_zone),
+        # Vertices go in as creation kwargs (see _vertex_fields) so faces with more
+        # than 4 vertices build instead of tripping eppy's setattr limit.
+        idf.newidfobject(
+            "BUILDINGSURFACE:DETAILED", Name=surface.source_id, Surface_Type=surface.surface_type,
+            Construction_Name=surface.construction, Zone_Name=surface.zone or default_zone,
             Outside_Boundary_Condition=boundary,
-            Outside_Boundary_Condition_Object=surface.get("boundary_object", ""),
-            Sun_Exposure=sun, Wind_Exposure=wind, Number_of_Vertices=len(surface["points"]))
-        for index, (vertex_x, vertex_y, vertex_z) in enumerate(surface["points"], start=1):
-            setattr(detailed, f"Vertex_{index}_Xcoordinate", round(vertex_x, 6))
-            setattr(detailed, f"Vertex_{index}_Ycoordinate", round(vertex_y, 6))
-            setattr(detailed, f"Vertex_{index}_Zcoordinate", round(vertex_z, 6))
+            Outside_Boundary_Condition_Object=surface.boundary_object,
+            Sun_Exposure=sun, Wind_Exposure=wind, Number_of_Vertices=len(surface.points),
+            **_vertex_fields(surface.points))
 
 
 def add_window_construction(idf, window_construction):
     """Emit the default glazing once: WindowMaterial:SimpleGlazingSystem + a Construction (W3)."""
     if not window_construction:
         return
-    glazing_material = window_construction["name"] + "_GLZ"
+    glazing_material = window_construction.name + "_GLZ"
     idf.newidfobject("WINDOWMATERIAL:SIMPLEGLAZINGSYSTEM", Name=glazing_material,
-                     UFactor=window_construction["u_factor"],
-                     Solar_Heat_Gain_Coefficient=window_construction["shgc"])
-    construction = idf.newidfobject("CONSTRUCTION", Name=window_construction["name"])
+                     UFactor=window_construction.u_factor,
+                     Solar_Heat_Gain_Coefficient=window_construction.shgc)
+    construction = idf.newidfobject("CONSTRUCTION", Name=window_construction.name)
     construction.Outside_Layer = glazing_material
 
 
@@ -210,24 +225,24 @@ def add_windows(idf, building, window_construction):
     """Emit one FenestrationSurface:Detailed per window on each wall (W1/W2)."""
     if not window_construction:
         return
-    for surface in building["surfaces"]:
-        for window in surface.get("windows", []):
-            fenestration = idf.newidfobject(
-                "FENESTRATIONSURFACE:DETAILED", Name=window["source_id"],
-                Surface_Type="Window", Construction_Name=window_construction["name"],
-                Building_Surface_Name=surface["source_id"],
-                Number_of_Vertices=len(window["points"]))
-            for index, (vertex_x, vertex_y, vertex_z) in enumerate(window["points"], start=1):
-                setattr(fenestration, f"Vertex_{index}_Xcoordinate", round(vertex_x, 6))
-                setattr(fenestration, f"Vertex_{index}_Ycoordinate", round(vertex_y, 6))
-                setattr(fenestration, f"Vertex_{index}_Zcoordinate", round(vertex_z, 6))
+    for surface in building.surfaces:
+        for window in surface.windows:
+            # Same all-at-creation vertex passing as walls (see _vertex_fields).
+            # NOTE: EnergyPlus caps WINDOWS at 4 vertices; our openings are quads, so
+            # this is safe. A >4-vertex opening would need simplifying to a quad first.
+            idf.newidfobject(
+                "FENESTRATIONSURFACE:DETAILED", Name=window.source_id,
+                Surface_Type="Window", Construction_Name=window_construction.name,
+                Building_Surface_Name=surface.source_id,
+                Number_of_Vertices=len(window.points),
+                **_vertex_fields(window.points))
 
 
 def _used_subset(building, constructions, materials):
     """Only the constructions/materials THIS building uses (avoids unused-object warnings)."""
-    cnames = {s["construction"] for s in building["surfaces"]}
+    cnames = {s.construction for s in building.surfaces}
     used_c = {n: constructions[n] for n in cnames if n in constructions}
-    mnames = {m for c in used_c.values() for m in c["layers"]}
+    mnames = {m for c in used_c.values() for m in c.layers}
     used_m = {n: materials[n] for n in mnames if n in materials}
     return used_c, used_m
 
@@ -235,7 +250,7 @@ def _used_subset(building, constructions, materials):
 def build_idf(building, constructions, materials, window_construction=None, out_dir=OUTPUT_IDF_DIR):
     ensure_idd()
     idf = new_empty_idf(weather_available())   # weather present -> RunPeriod + result outputs; else not
-    idf.idfobjects["BUILDING"][0].Name = building["id"]
+    idf.idfobjects["BUILDING"][0].Name = building.id
     used_c, used_m = _used_subset(building, constructions, materials)
     add_materials(idf, used_m)
     add_constructions(idf, used_c)
@@ -243,7 +258,7 @@ def build_idf(building, constructions, materials, window_construction=None, out_
     add_window_construction(idf, window_construction)   # W3 glazing (if any)
     add_windows(idf, building, window_construction)      # W1/W2 fenestration (if any)
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{building['id']}.idf")
+    out_path = os.path.join(out_dir, f"{building.id}.idf")
     idf.saveas(out_path)
     return out_path
 
@@ -270,14 +285,14 @@ def run_energyplus(idf_path, weather=WEATHER_EPW, out_dir=None):
 def main(path=None):
     doc = xml_io.CityGMLDoc(path or xml_io.DEFAULT_INPUT)
     middle = build_idf_middle_layer(doc)
-    cons, mats = middle["constructions"], middle["materials"]
-    for b in middle["buildings"]:
+    cons, mats = middle.constructions, middle.materials
+    for b in middle.buildings:
         idf_path = build_idf(b, cons, mats)
         rc, err = run_energyplus(idf_path)
         sev = [ln for ln in err.splitlines() if "** Severe" in ln or "** Fatal" in ln]
         warns = sum(1 for ln in err.splitlines() if "** Warning" in ln)
         status = "OK" if not sev else f"{len(sev)} SEVERE/FATAL"
-        print(f"{b['id']:<12} {len(b['surfaces']):>2} surf  exit={rc}  warnings={warns}  -> {status}")
+        print(f"{b.id:<12} {len(b.surfaces):>2} surf  exit={rc}  warnings={warns}  -> {status}")
         for ln in sev[:8]:
             print("    ", ln.strip())
 

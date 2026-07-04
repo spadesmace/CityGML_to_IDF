@@ -158,7 +158,7 @@ def assign_zones(doc, middle):
         for zone_element in zone_elements:
             name = zone_element.get(GML_ID) or f"{building['id']}_Zone{len(zones) + 1}"
             if coincides_with_hull(doc, zone_element):
-                owned_ids = set(building_surface_ids)
+                owned_ids = set(building_surface_ids)  # the zone OWNS THE WHOLE SHELL
             else:
                 owned_ids = set()
                 for sid in boundary_surface_ids(doc, zone_element):

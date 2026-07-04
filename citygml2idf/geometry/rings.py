@@ -26,6 +26,7 @@ def drop_closing_point(points):
     return [tuple(p) for p in points]
 
 
+#compute the geometric arrow 
 def newell_normal(points):
     """Polygon normal by Newell's method — robust for any polygon orientation and
     any vertex count, and stable for slightly non-planar rings. NOT normalised:
@@ -61,7 +62,7 @@ def centroid(points):
     pts = np.array(drop_closing_point(points), dtype=float)
     return pts.mean(axis=0)
 
-
+# decide in vs out using a reference
 def orient_outward(points, interior_point):
     """Return (ring, outward_unit_normal) with the ring wound so its normal points
     AWAY from interior_point (the zone centroid).
@@ -72,7 +73,7 @@ def orient_outward(points, interior_point):
     pts = drop_closing_point(points)
     n = unit_normal(pts)
     to_face = centroid(pts) - np.asarray(interior_point, dtype=float)
-    if float(np.dot(n, to_face)) < 0.0:
-        pts = list(reversed(pts))
+    if float(np.dot(n, to_face)) < 0.0: # # arrow points back at inside?
+        pts = list(reversed(pts)) # # flip it
         n = -n
     return pts, n

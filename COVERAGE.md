@@ -38,10 +38,12 @@ separate surfaces).
 
 ### Geometry — [building_surfaces.py](citygml2idf/semantics/building_surfaces.py), [geometry/](citygml2idf/geometry/)
 **Handled:** `posList` (2D/3D); CRS read + reproject-if-geographic + recenter; Newell normal, outward
-re-orientation (file winding ignored), area; LoD2/3 thematic surfaces via both `bldg:boundedBy` and
-`nrg3:thermalBoundary`; LoD1 solid faces classified by normal; exterior ring only (holes ignored — correct
-for E+); the 3-way cascade thermalBoundary → boundedBy → raw solid.
+re-orientation for **convex** masses (file winding ignored), area; LoD2/3 thematic surfaces via both
+`bldg:boundedBy` and `nrg3:thermalBoundary`; LoD1 solid faces classified by normal; exterior ring only
+(holes ignored — correct for E+); the 3-way cascade thermalBoundary → boundedBy → raw solid.
 **Not handled:**
+- **Outward normals are correct only for CONVEX buildings.** Each face's outward direction is decided by
+  pointing *away from the building's (or zone's) vertex-average centroid* ([building_surfaces.py](citygml2idf/semantics/building_surfaces.py) `interior = rings.centroid(all_pts)` → [rings.py](citygml2idf/geometry/rings.py) `orient_outward`). For a box/convex mass the centroid is always inside, so this is right. For a **concave footprint (L/T/U, courtyard)** the centroid can fall in the "dent" (outside the solid), so the dent-facing **inner walls get flipped inward** → wrong azimuth, and at LoD1 even wrong roof↔floor (role comes from `normal.z`). The Alderaan sample is all convex, so this never triggers there. **Fix when needed:** orient all faces *consistently* via signed volume (divergence theorem) on the closed solid — shape-proof, no centroid — with a per-face ray test as fallback for non-closed LoD2/3 sets.
 - **Multi-zone LoD1 coincident-face matching** (the Case 1.2 gap).
 - **Implicit-representation geometry** (`lod3ImplicitRepresentation` on zones/openings) — only explicit
   `MultiSurface` is read.
@@ -159,6 +161,7 @@ flag `DEFAULT_WWR` injects a ratio. `DEFAULT_WWR` is effectively a stand-in for 
 
 | Gap | Step / file to add it |
 |---|---|
+| **Outward normals for CONCAVE buildings** (L/T/U) | replace the centroid heuristic in [rings.py](citygml2idf/geometry/rings.py) `orient_outward` / [building_surfaces.py](citygml2idf/semantics/building_surfaces.py) with consistent orientation via signed volume on the closed solid (per-face ray test as fallback) |
 | Multi-zone **LoD1** interzone (coincident solid faces) | new adjacency-matcher in [zones.py](citygml2idf/model/zones.py), with faces tagged per solid in [building_surfaces.py](citygml2idf/semantics/building_surfaces.py) — runs before `assign_zones` pass 2 |
 | Honor **`bdgBdrySurfIsAdiabatic`** | read it in [building_surfaces.py](citygml2idf/semantics/building_surfaces.py); let it win in `assign_zones` pass 2 ([zones.py](citygml2idf/model/zones.py)) |
 | **LoD3 opening coplanarity** projection | [openings.py](citygml2idf/model/openings.py) `explicit_windows` — project ring onto host-wall plane (or warn+skip) |
@@ -171,10 +174,13 @@ flag `DEFAULT_WWR` injects a ratio. `DEFAULT_WWR` is effectively a stand-in for 
 
 ## Priority note
 
-Of the gaps above, two would make a real-world file **fail or be silently wrong** rather than merely
+Of the gaps above, three would make a real-world file **fail or be silently wrong** rather than merely
 under-detailed:
-1. **Multi-zone LoD1** (Case 1.2) — faces collapse into one zone.
-2. **Non-coplanar LoD3 opening** — EnergyPlus can reject the sub-surface.
+1. **Concave building** (L/T/U) — inner walls flip inward (wrong azimuth; wrong roof/floor at LoD1).
+2. **Multi-zone LoD1** (Case 1.2) — faces collapse into one zone.
+3. **Non-coplanar LoD3 opening** — EnergyPlus can reject the sub-surface.
 
-Everything else degrades gracefully (defaults + warnings). The `validation_file/Alderaan_*` samples include a
-`CoincidesWithLoD2Hull` file, which exercises special case 5.1 (handled).
+All three are **untriggered by the current sample**: every Alderaan building is convex, single-zone-per-shape
+or hull/thermalBoundary based, with coplanar/ratio openings. Everything else degrades gracefully (defaults +
+warnings). The `validation_file/Alderaan_*` samples include a `CoincidesWithLoD2Hull` file, which exercises
+special case 5.1 (handled).

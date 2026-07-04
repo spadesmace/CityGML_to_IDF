@@ -58,7 +58,7 @@ def window_ring(doc, window_element):
     geometry = doc.children(window_element, "bldg", "lod3MultiSurface")
     return xml_io.read_pos_list(doc, geometry[0]) if geometry else []
 
-
+# LOD 3
 def explicit_windows(doc, wall_element, origin_offset):
     """A. LoD3 explicit `bldg:Window` polygons, recentred to the building origin.
     (Doors are skipped -> opaque, W5. Reprojection for a geographic CRS = `#` later.)"""
@@ -80,10 +80,10 @@ def explicit_windows(doc, wall_element, origin_offset):
             warn(f"window {window_element.get(GML_ID) or '(no id)'} has no LoD3 geometry; falling back to ratios/areas")
     return found_windows
 
-
+# LOD 2
 def window_to_wall_ratio_from_attributes(doc, wall_element):
     """B/C: openingToSurfaceRatio, else (total - opaque)/total. None if neither given."""
-    stated_ratio = to_number(child_text_value(doc, wall_element, "nrg", "bdgBdrySurfOpeningToSurfaceRatio"))
+    stated_ratio = to_number(child_text_value(doc, wall_element, "nrg", "bdgBdrySurfOpeningToSurfaceRatio")) # known as WWR
     if stated_ratio is not None:
         return stated_ratio
     total_area = to_number(child_text_value(doc, wall_element, "nrg", "bdgBdrySurfTotalSurfaceArea"))

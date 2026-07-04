@@ -2,6 +2,14 @@
 model/constructions.py — the LIBRARIAN. Resolve each surface's construction into
 ordered EnergyPlus material layers.
 
+This module is the RESOLVER: it walks the construction owners of a surface and runs
+the TIER waterfall (see _resolve_surface). The pieces it stands on were split out for
+readability and live next door:
+    units.py        — value coercion + unit conversion (metres, W/m-K, …)
+    citygml_read.py — typed GML child readers (_first_el/_child_text/_measure/_code)
+    materials.py    — the 3 EnergyPlus material builders + DEFAULT_MATERIAL
+    catalogue.py    — Excel/DB + in-file library, keyed by (codeSpace, code)
+
 HOW A CONSTRUCTION AND ITS MATERIALS FIND EACH OTHER (Energy ADE 3.0):
   The STRUCTURAL link (construction -> layer -> material) is by gml:id — inline
   nesting OR xlink:href. It is NOT libraryCode. `libraryCode` (a gml:CodeType,
@@ -10,391 +18,39 @@ HOW A CONSTRUCTION AND ITS MATERIALS FIND EACH OTHER (Energy ADE 3.0):
   catalogue entry is the PAIR (codeSpace, code) — never the bare code, because two
   catalogues may reuse the same code string for different things.
 
-ORDER we resolve ONE surface's construction (each step BYPASSES the rest on success):
-  0. xlink   — if the surface's nrg:layeredConstruction points by gml:id, it is
-               already followed upstream, so we hold the referenced LayeredConstruction.
-  1. EXCEL   — (codeSpace, code) is in the Excel/DB   -> build from the EXCEL   (primary)
-  2. inline  — the construction's OWN nrg:layer list   -> most-local explicit layers
-  3. library — it only NAMED a code; the layers live in a LayeredConstructionLibrary
-               member -> find that member by (codeSpace, code) and drill it
-  4. uValue  — no layers, only nrg:uValue              -> Material:NoMass (R = 1/U), averaged (LoD1)
-  5. default — nothing usable                          -> generic DEFAULT construction + warning
-
-Each layer becomes ONE of the 3 EnergyPlus material objects, chosen by the SOURCE
-(never guessed): `Material` / `Material:NoMass` / `Material:AirGap`. Same construction
-on many surfaces is resolved ONCE (dedup). All Excel-shape knowledge lives in
-SHEET_NAMES / COLUMN_MAP — change the spreadsheet, not the code. The DB is treated as
-ONE catalogue identified by EXCEL_CODESPACE, so a better DB can be swapped in later.
-
-Run as a demo (from the repo root):
+Same construction on many surfaces is resolved ONCE (dedup in resolve_all). Run as a
+demo (from the repo root):
     python -m citygml2idf.model.constructions
 resolves every surface and prints each construction's branch + layers + E+ material type.
 """
 
 from __future__ import annotations
 
-import math
-import os
 import sys
 from collections import Counter
 
-import pandas as pd
-
 from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, local_name, warn
+from .catalogue import (COLUMN_MAP, DEFAULT_DB, SHEET_NAMES, _element_has_layers,
+                        _excel_match, _index_file_library, _library_member_for_code,
+                        _load_database_or_empty, load_database)
+from .citygml_read import _child_code, _child_measure, _child_text, _first_el
+from .materials import (DEFAULT_MATERIAL, DEFAULT_ROUGHNESS, _material_from_citygml,
+                        _material_from_excel)
+from .units import _length_to_meters, _num, _u_value_to_w_per_m2_k
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_PKG = os.path.dirname(_HERE)
-DEFAULT_DB = os.path.join(_PKG, "input", "construction_db.xlsx")
+# Compatibility re-exports: openings.py / zones.py / reader.py import several of the
+# names above through this module (e.g. `from .constructions import _child_text, _num`,
+# `constructions.COLUMN_MAP`). They now LIVE in the split modules; importing them here
+# keeps `constructions.<name>` working so those callers need no change.
 
-# ===== the ONLY place that knows the spreadsheet's shape =====================
-SHEET_NAMES = {"constructions": "constructions", "materials": "materials", "windows": "windows"}
-COLUMN_MAP = {
-    "code": "code", "code_space": "code_space", "layer_order": "layer_order",
-    "material_name": "material_name",
-    "material_type": "material_type", "thickness": "thickness", "conductivity": "conductivity",
-    "density": "density", "specific_heat": "specific_heat", "roughness": "roughness",
-    "thermal_resistance": "thermal_resistance",
-    "u_value": "u_value", "g_value": "g_value",   # windows sheet (used by model/openings.py)
-}
-# `code_space` qualifies which catalogue a `code` belongs to (the DB declares it as
-# data, so a better DB can be swapped in). A blank cell = catalogue-agnostic. The
-# entry identity is the PAIR (code_space, code) — never the bare code.
-
-# ===== defaults (RULES M2): never emit a material missing a required field ====
-DEFAULT_ROUGHNESS = "MediumRough"
-DEFAULT_MATERIAL = {"name": "DEFAULT_OPAQUE", "eplus": "Material", "thickness": 0.20,
-                    "conductivity": 1.0, "density": 1800.0,
-                    # EnergyPlus minimum for Material.Specific Heat is 100 J/kg-K.
-                    "specific_heat": 100.0,
-                    "roughness": DEFAULT_ROUGHNESS}
 DEFAULT_NAME = "DEFAULT_CONSTRUCTION"
 ADE_LAYER_ORDER = "inside_to_outside" # in ernergy ade specifcation (3.8 The Layered construction module)
 
 
-# ----- small value helpers ---------------------------------------------------
-def _num(v, default=None):
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return default
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return default
-
-
-def _str(v, default=None):
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return default
-    return str(v)
-
-
-def _trace_value(v):
-    """JSON-safe raw trace value: pandas blanks/NaN become null."""
-    try:
-        if pd.isna(v):
-            return None
-    except (TypeError, ValueError):
-        pass
-    if hasattr(v, "item"):
-        try:
-            return v.item()
-        except (TypeError, ValueError):
-            pass
-    return v
-
-
-def _first_el(doc, prop):
-    """The object inside a property: its inline child, or the xlink it points to."""
-    return doc.property_object(prop)
-
-
-def _child_text(doc, parent, prefix, local):
-    if parent is None:
-        return None
-    els = doc.children(parent, prefix, local)
-    return els[0].text.strip() if els and els[0].text and els[0].text.strip() else None
-
-
-def _child_measure(doc, parent, prefix, local):
-    """Return (numeric value, uom) for a gml:MeasureType-like child."""
-    if parent is None:
-        return None, None
-    els = doc.children(parent, prefix, local)
-    if not els:
-        return None, None
-    el = els[0]
-    text = el.text.strip() if el.text and el.text.strip() else None
-    return _num(text), (el.get("uom") or "").strip()
-
-
-def _child_code(doc, parent, prefix, local):
-    """Return (code text, codeSpace) for a gml:CodeType-like child."""
-    if parent is None:
-        return None, None
-    els = doc.children(parent, prefix, local)
-    if not els:
-        return None, None
-    el = els[0]
-    text = el.text.strip() if el.text and el.text.strip() else None
-    return text, el.get("codeSpace")
-
-
-def _length_to_meters(value, uom, context="length"):
-    """EnergyPlus expects material thickness in metres."""
-    if value is None:
-        return None
-    unit = (uom or "m").strip().lower()
-    if unit in ("m", "meter", "meters", "metre", "metres"):
-        return value
-    if unit in ("mm", "millimeter", "millimeters", "millimetre", "millimetres"):
-        return value / 1000.0
-    if unit in ("cm", "centimeter", "centimeters", "centimetre", "centimetres"):
-        return value / 100.0
-    warn(f"{context}: unknown length unit '{uom}', assuming metres")
-    return value
-
-
-def _conductivity_to_w_per_m_k(value, uom, context="conductivity"):
-    """EnergyPlus Material requires conductivity in W/m-K."""
-    if value is None:
-        return None
-    unit = (uom or "W/m-K").strip().lower().replace(" ", "")
-    if unit.startswith("kw"):
-        return value * 1000.0
-    if "w" in unit and "m" in unit and "k" in unit:
-        return value
-    warn(f"{context}: unknown conductivity unit '{uom}', assuming W/m-K")
-    return value
-
-
-def _density_to_kg_per_m3(value, uom, context="density"):
-    """EnergyPlus Material requires density in kg/m3."""
-    if value is None:
-        return None
-    unit = (uom or "kg/m3").strip().lower().replace(" ", "")
-    if unit in ("kg/m3", "kg/m^3", "kg/m**3"):
-        return value
-    if unit in ("g/cm3", "g/cm^3", "g/cm**3"):
-        return value * 1000.0
-    warn(f"{context}: unknown density unit '{uom}', assuming kg/m3")
-    return value
-
-
-def _specific_heat_to_j_per_kg_k(value, uom, context="specific heat"):
-    """EnergyPlus Material requires specific heat in J/kg-K and at least 100 due to Energy+.idd"""
-    if value is None:
-        return None
-    unit = (uom or "J/kg-K").strip().lower().replace(" ", "")
-    if "kj" in unit:
-        value *= 1000.0
-    if value < 100.0:
-        warn(f"{context}: value {value} J/kg-K is below EnergyPlus minimum; using default {DEFAULT_MATERIAL['specific_heat']}")
-        return DEFAULT_MATERIAL["specific_heat"]
-    return value
-
-
-def _u_value_to_w_per_m2_k(value, uom, context="uValue"):
-    """EnergyPlus R-only fallback needs U in W/m2-K so R = 1 / U."""
-    if value is None:
-        return None
-    unit = (uom or "W/m2-K").strip().lower().replace(" ", "")
-    if "w" in unit and ("m2" in unit or "m^2" in unit) and "k" in unit:
-        return value
-    warn(f"{context}: unknown uValue unit '{uom}', assuming W/m2-K")
-    return value
-
-
-def _airgap_resistance_for_energyplus(doc, mat_el, name):
-    """EnergyPlus Material:AirGap thermal resistance is m2-K/W."""
-    value, uom = _child_measure(doc, mat_el, "nrg", "rValue")
-    unit = (uom or "").lower().replace(" ", "")
-    if value is not None and ("m2" in unit or "m^2" in unit) and "k" in unit and "w" in unit:
-        return value, {"raw_value": value, "raw_uom": uom, "eplus_unit": "m2-K/W",
-                       "converted_value": value, "usable": True}
-    if value is not None:
-        reason = f"rValue unit '{uom}' is not EnergyPlus thermal resistance"
-        warn(f"gas material '{name}': {reason}; using default opaque material for this layer")
-        return None, {"raw_value": value, "raw_uom": uom, "eplus_unit": "m2-K/W",
-                      "converted_value": None, "usable": False, "reason": reason}
-    reason = "missing rValue"
-    warn(f"gas material '{name}': {reason}; using default opaque material for this layer")
-    return None, {"raw_value": None, "raw_uom": uom, "eplus_unit": "m2-K/W",
-                  "converted_value": None, "usable": False, "reason": reason}
-
-
-def _default_material_copy(name, reason):
-    material = dict(DEFAULT_MATERIAL, name=name)
-    material["source"] = "default"
-    material["fallback_reason"] = reason
-    return material
-
-
-def _empty_database():
-    return {"constructions": {}, "construction_codespaces": {}, "materials": {}}
-
-
-def _load_database_or_empty():
-    try:
-        return load_database()
-    except Exception as exc:
-        warn(f"could not load Excel construction database ({type(exc).__name__}: {exc}); using CityGML/default fallback")
-        return _empty_database()
-
-
-# ===== Excel database ========================================================
-def load_database(xlsx_path=DEFAULT_DB):
-    """Read the spreadsheet into {constructions: code->[material_name…],
-    construction_codespaces: code->codeSpace, materials: name->row}.
-    Lookup by key, never row position (extra rows/cols are fine).
-
-    The `code_space` column is REQUIRED — it is the catalogue half of the
-    (codeSpace, code) identity. A missing column RAISES (caught by
-    _load_database_or_empty, which warns and degrades to CityGML/default) rather
-    than silently matching by bare code, which would re-open the cross-catalogue
-    collision this design exists to prevent. A blank CELL is fine: it means that
-    row is catalogue-agnostic (matched by bare code)."""
-    cons_df = pd.read_excel(xlsx_path, sheet_name=SHEET_NAMES["constructions"])
-    mats_df = pd.read_excel(xlsx_path, sheet_name=SHEET_NAMES["materials"])
-    if COLUMN_MAP["code_space"] not in cons_df.columns:
-        raise KeyError(f"constructions sheet is missing the required "
-                       f"'{COLUMN_MAP['code_space']}' column")
-    constructions, construction_codespaces = {}, {}
-    for code, grp in cons_df.groupby(COLUMN_MAP["code"]):
-        grp = grp.sort_values(COLUMN_MAP["layer_order"])          # 1 = inside (Energy ADE)
-        constructions[str(code)] = [str(m) for m in grp[COLUMN_MAP["material_name"]]]
-        # which catalogue this code belongs to; blank cell -> None = agnostic
-        construction_codespaces[str(code)] = _str(grp[COLUMN_MAP["code_space"]].iloc[0])
-    materials = {str(r[COLUMN_MAP["material_name"]]): r.to_dict() for _, r in mats_df.iterrows()}
-    return {"constructions": constructions,
-            "construction_codespaces": construction_codespaces,
-            "materials": materials}
-
-
-# ===== material builders (one of the 3 E+ objects) ===========================
-def _material_from_excel(name, db):
-    row = db["materials"].get(name)
-    if row is None:
-        warn(f"material '{name}' missing from Excel materials sheet; using default")
-        return _default_material_copy(name, "material missing from Excel materials sheet")
-
-    mtype = _str(row.get(COLUMN_MAP["material_type"]), "Material")
-    raw_excel = {
-        "material_type": _trace_value(row.get(COLUMN_MAP["material_type"])),
-        "thickness": _trace_value(row.get(COLUMN_MAP["thickness"])),
-        "conductivity": _trace_value(row.get(COLUMN_MAP["conductivity"])),
-        "density": _trace_value(row.get(COLUMN_MAP["density"])),
-        "specific_heat": _trace_value(row.get(COLUMN_MAP["specific_heat"])),
-        "roughness": _trace_value(row.get(COLUMN_MAP["roughness"])),
-        "thermal_resistance": _trace_value(row.get(COLUMN_MAP["thermal_resistance"])),
-        "assumed_units": {"thickness": "m", "conductivity": "W/m-K",
-                          "density": "kg/m3", "specific_heat": "J/kg-K",
-                          "thermal_resistance": "m2-K/W"},
-    }
-
-    if mtype == "Material:AirGap":
-        resistance = _num(row.get(COLUMN_MAP["thermal_resistance"]), 0.15)
-        return {"name": name, "eplus": "Material:AirGap",
-                "thermal_resistance": resistance,
-                "source": "excel", "eplus_unit": "m2-K/W",
-                "raw_excel": raw_excel,
-                "converted": {"thermal_resistance": {"value": resistance, "unit": "m2-K/W"}}}
-    if mtype == "Material:NoMass":
-        resistance = _num(row.get(COLUMN_MAP["thermal_resistance"]), 0.1)
-        return {"name": name, "eplus": "Material:NoMass",
-                "roughness": _str(row.get(COLUMN_MAP["roughness"]), DEFAULT_ROUGHNESS),
-                "thermal_resistance": resistance,
-                "source": "excel", "eplus_unit": "m2-K/W",
-                "raw_excel": raw_excel,
-                "converted": {"thermal_resistance": {"value": resistance, "unit": "m2-K/W"}}}
-
-    thickness = _num(row.get(COLUMN_MAP["thickness"]), DEFAULT_MATERIAL["thickness"])
-    conductivity = _num(row.get(COLUMN_MAP["conductivity"]), DEFAULT_MATERIAL["conductivity"])
-    density = _num(row.get(COLUMN_MAP["density"]), DEFAULT_MATERIAL["density"])
-    specific_heat = _num(row.get(COLUMN_MAP["specific_heat"]), DEFAULT_MATERIAL["specific_heat"])
-    return {"name": name, "eplus": "Material",
-            "thickness": thickness,
-            "conductivity": conductivity,
-            "density": density,
-            "specific_heat": specific_heat,
-            "roughness": _str(row.get(COLUMN_MAP["roughness"]), DEFAULT_ROUGHNESS),
-            "source": "excel",
-            "raw_excel": raw_excel,
-            "converted": {"thickness": {"value": thickness, "unit": "m"},
-                          "conductivity": {"value": conductivity, "unit": "W/m-K"},
-                          "density": {"value": density, "unit": "kg/m3"},
-                          "specific_heat": {"value": specific_heat, "unit": "J/kg-K"}},
-            "eplus_units": {"thickness": "m", "conductivity": "W/m-K",
-                            "density": "kg/m3", "specific_heat": "J/kg-K"}}
-
-
-def _citygml_material_name(mat_el, layer_el=None):
-    mat_id = mat_el.get(GML_ID) if mat_el is not None else "citygml_material"
-    layer_id = layer_el.get(GML_ID) if layer_el is not None else None
-    return f"{layer_id}_{mat_id}" if layer_id else mat_id
-
-
-def _material_from_citygml(doc, mat_el, thickness, layer_el=None):
-    """SolidMaterial -> Material; Gas -> Material:AirGap; incomplete -> NoMass fallback."""
-    if mat_el is None:
-        return _default_material_copy(_citygml_material_name(mat_el, layer_el), "missing material reference")
-    name = _citygml_material_name(mat_el, layer_el)
-    if local_name(mat_el) == "Gas":
-        resistance, trace = _airgap_resistance_for_energyplus(doc, mat_el, name)
-        raw_citygml = {"type": "Gas", "rValue": trace["raw_value"], "rValue_uom": trace["raw_uom"]}
-        converted = {"thermal_resistance": {"value": trace["converted_value"],
-                                             "unit": trace["eplus_unit"]}}
-        if resistance is None:
-            material = _default_material_copy(name, trace.get("reason", "gas rValue is not usable"))
-            material["raw_citygml"] = raw_citygml
-            material["converted"] = converted
-            return material
-        return {"name": name, "eplus": "Material:AirGap",
-                "thermal_resistance": resistance,
-                "source": "citygml_gas",
-                "raw_citygml": raw_citygml,
-                "converted": converted}
-    cond_value, cond_uom = _child_measure(doc, mat_el, "nrg", "thermalConductivity")
-    dens_value, dens_uom = _child_measure(doc, mat_el, "nrg", "density")
-    cond = _conductivity_to_w_per_m_k(cond_value, cond_uom, context=f"material '{name}' thermalConductivity")
-    dens = _density_to_kg_per_m3(dens_value, dens_uom, context=f"material '{name}' density")
-    cp_value, cp_uom = _child_measure(doc, mat_el, "nrg", "specificHeatCapacity")
-    cp = _specific_heat_to_j_per_kg_k(cp_value, cp_uom, context=f"material '{name}' specificHeatCapacity")
-    raw_citygml = {"type": "SolidMaterial",
-                   "thermalConductivity": cond_value, "thermalConductivity_uom": cond_uom,
-                   "density": dens_value, "density_uom": dens_uom,
-                   "specificHeatCapacity": cp_value, "specificHeatCapacity_uom": cp_uom,
-                   "thickness": thickness}
-    converted = {"thickness": {"value": thickness, "unit": "m"},
-                 "conductivity": {"value": cond, "unit": "W/m-K"},
-                 "density": {"value": dens, "unit": "kg/m3"},
-                 "specific_heat": {"value": cp, "unit": "J/kg-K"}}
-    if cond and dens and cp and thickness:
-        return {"name": name, "eplus": "Material", "thickness": thickness,
-                "conductivity": cond, "density": dens, "specific_heat": cp,
-                "roughness": DEFAULT_ROUGHNESS,
-                "source": "citygml_solid",
-                "raw_citygml": raw_citygml,
-                "converted": converted,
-                "eplus_units": {"thickness": "m", "conductivity": "W/m-K",
-                                "density": "kg/m3", "specific_heat": "J/kg-K"}}
-    if cond and thickness:                                        # mass data missing
-        warn(f"material '{name}': no density/specific-heat; fallback to NoMass")
-        resistance = thickness / cond
-        return {"name": name, "eplus": "Material:NoMass",
-                "roughness": DEFAULT_ROUGHNESS, "thermal_resistance": resistance,
-                "source": "citygml_partial_solid",
-                "raw_citygml": raw_citygml,
-                "converted": {"thermal_resistance": {"value": resistance, "unit": "m2-K/W"}},
-                "eplus_unit": "m2-K/W"}
-    warn(f"material '{name}': insufficient data; using default")
-    material = _default_material_copy(name, "insufficient SolidMaterial data")
-    material["raw_citygml"] = raw_citygml
-    material["converted"] = converted
-    return material
-
-
 # ===== construction builders (the 3 branches) ================================
 def _from_excel(code, db, materials, reverse=False):
+    """Build a construction from the Excel/DB catalogue entry `code`."""
     layer_names = list(db["constructions"][code])
     if reverse:
         layer_names = list(reversed(layer_names))
@@ -405,6 +61,7 @@ def _from_excel(code, db, materials, reverse=False):
 
 
 def _base_layered_construction(doc, constr_el):
+    """The baseLayeredConstruction a ReverseLayeredConstruction points to, or None."""
     props = doc.children(constr_el, "nrg", "baseLayeredConstruction")
     return _first_el(doc, props[0]) if props else None
 
@@ -425,10 +82,12 @@ def _construction_code_info(doc, constr_el):
 
 
 def _construction_code(doc, constr_el):
+    """The libraryCode string of a construction (ignoring codeSpace)."""
     return _construction_code_info(doc, constr_el)["value"]
 
 
 def _construction_name(doc, constr_el, code):
+    """A stable E+ construction name: the code, else the gml:id, else a default."""
     if constr_el is None:
         return DEFAULT_NAME
     if local_name(constr_el) == "ReverseLayeredConstruction":
@@ -440,6 +99,8 @@ def _construction_name(doc, constr_el, code):
 # parse ordered Layer -> thickness -> material first; if no layers exist, use
 # LayeredConstruction.uValue as an averaged no-mass construction (R = 1 / U).
 def _from_citygml(doc, constr_el, materials):
+    """Build a construction from a LayeredConstruction's own inline layers, or its
+    uValue (R = 1/U). Returns {"layers": [...]} for either; empty layers = nothing usable."""
     if constr_el is None:
         return {"source": "citygml_none", "layers": [], "layer_order": ADE_LAYER_ORDER}
     # It points by XLink to a base LayeredConstruction, and means “use the same layers but reversed.”
@@ -496,6 +157,7 @@ def _from_citygml(doc, constr_el, materials):
     return {"source": "citygml", "layers": [], "layer_order": ADE_LAYER_ORDER}
 
 
+# ===== construction owner cascade ============================================
 # Read layeredConstruction only from schema-valid CityObject owners.
 # This covers BoundarySurface, ThermalZone, BuildingPart, Building; it rejects
 # raw gml:Polygon faces from LoD1 solids.
@@ -562,7 +224,9 @@ def _construction_owner_checks(doc, surf_el, context_ids=None):
     return checks
 
 
+# ===== resolution trace ======================================================
 def _with_context(resolved, owner_id):
+    """Tag a resolved construction with the owner id it came from."""
     out = dict(resolved)
     if owner_id:
         out["source_context_id"] = owner_id
@@ -570,6 +234,7 @@ def _with_context(resolved, owner_id):
 
 
 def _new_trace(surface_record, surf_el, owner_checks):
+    """Fresh, empty resolution trace for one surface (filled in as tiers run)."""
     return {
         "surface_id": surface_record.get("source_id"),
         "source_gml_id": surface_record.get("source_gml_id") or surface_record.get("source_id"),
@@ -586,6 +251,7 @@ def _new_trace(surface_record, surf_el, owner_checks):
 
 
 def _select_trace(trace, owner_id, constr_el, code_info, source):
+    """Record which owner/construction/code the waterfall selected."""
     trace.update({
         "selected_owner": owner_id,
         "selected_construction_id": constr_el.get(GML_ID) if constr_el is not None else None,
@@ -597,124 +263,85 @@ def _select_trace(trace, owner_id, constr_el, code_info, source):
     return trace
 
 
-# ===== catalogue lookup by (codeSpace, code) =================================
-# The identity of a library/DB entry is the PAIR (codeSpace, code), never the bare
-# code: two catalogues may reuse the same code string for different things.
-def _excel_match(code, code_space, db):
-    """True when the Excel/DB should answer for this (codeSpace, code).
-
-    The DB declares each code's codeSpace (the `code_space` column):
-      * DB codeSpace blank (None) -> catalogue-agnostic row: match by bare code;
-      * file code unqualified (None) -> accept the DB row (best effort);
-      * otherwise -> match only when the two codeSpaces are EQUAL.
-    This is what stops two catalogues that reuse a code from colliding.
-    """
-    if not code or code not in db.get("constructions", {}):
-        return False
-    db_code_space = db.get("construction_codespaces", {}).get(code)
-    if db_code_space is None or code_space is None:
-        return True
-    return code_space == db_code_space
-
-
-def _element_has_layers(doc, constr_el):
-    """True if a LayeredConstruction carries its OWN inline nrg:layer children."""
-    return constr_el is not None and bool(doc.children(constr_el, "nrg", "layer"))
-
-
-def _index_file_library(doc):
-    """Index every LayeredConstruction in the file by (codeSpace, code).
-
-    This is the file's OWN catalogue (its LayeredConstructionLibrary members). It
-    lets a construction named ONLY by libraryCode — whose layers live in a library
-    member we did NOT reach by xlink — still be resolved by its code. Keyed by the
-    (codeSpace, code) PAIR so codes are never confused across catalogues; first
-    definition of a key wins.
-    """
-    library = {}
-    for constr_el in doc.iter_type("nrg", "LayeredConstruction"):
-        code, code_space = _child_code(doc, constr_el, "nrg", "libraryCode")
-        if code:
-            library.setdefault((code_space, code), constr_el)
-    return library
-
-
-def _library_member_for_code(code, code_space, file_library):
-    """The file's own LayeredConstruction with this EXACT (codeSpace, code), or None.
-    Exact-pair match only — we never guess across codeSpaces."""
-    if not code or not file_library:
-        return None
-    return file_library.get((code_space, code))
-
-
-# Resolve ONE surface's construction. ORDER (each step BYPASSES the rest on success):
-#   1. EXCEL by (codeSpace, code)            -> the curated DB                  (primary)
-#   2. the construction's OWN inline layers  -> most-local explicit statement
-#   3. IN-FILE library by (codeSpace, code)  -> layers held in a library member not
-#                                               reached by xlink; find it, drill it
-#   4. uValue -> Material:NoMass (R = 1/U)   -> averaged fallback (e.g. LoD1)
-#   5. DEFAULT construction + warning        -> nothing usable
-# Step 0 is implicit: if the surface's layeredConstruction is an xlink, it is already
-# followed by property_object, so `constr_el` IS the referenced library member.
+# ===== the TIER waterfall (meeting decision) =================================
+# Resolve ONE surface's construction. MOST DETAILED FIRST; the external code/Excel is
+# the LAST fallback, never first.
+#   TIER 1  CityGML DETAILED layers — the construction's own inline nrg:layer, OR an
+#           in-file LayeredConstructionLibrary member (reached by xlink OR by the
+#           (codeSpace, code) pair).
+#   TIER 2  CityGML AVERAGED value  — no layers, only nrg:uValue -> Material:NoMass
+#           (R = 1/U). The typical LoD1 hull case.
+#   TIER 3  EXTERNAL Excel/DB code  — (codeSpace, code) -> construction_db.xlsx.
+#           PLACEHOLDER for the archetype (TABULA / UBEM-CARDs) DB. LAST fallback,
+#           reached ONLY when the CityGML gave nothing. Raw data always beats a code.
+#   TIER 4  DEFAULT construction    — nothing usable anywhere.
+# Tiers 1+2 are read from the CityGML (already in memory), so there is NO speed reason
+# to check the Excel first. (xlink is implicit: property_object already followed it,
+# so `constr_el` IS the referenced object.)
 def _resolve_surface(doc, surf_el, surface_record, db, materials, file_library):
     """Return (construction_name, resolved_dict, trace) for one surface."""
     # For LoD1 raw solids, surf_el is a gml:Polygon and cannot own Energy ADE
-    # layeredConstruction. The valid averaged construction path is via the
-    # ThermalZone / Building context passed in context_ids.
+    # layeredConstruction; the construction comes from the ThermalZone / Building
+    # context passed in context_ids.
     context_ids = surface_record.get("construction_context_ids")
     trace = _new_trace(surface_record, surf_el, _construction_owner_checks(doc, surf_el, context_ids))
-    for owner_id, constr_el in _construction_candidates(doc, surf_el, context_ids):
+    candidates = _construction_candidates(doc, surf_el, context_ids)
+
+    # ===== TIER 1 + TIER 2 : the CityGML's OWN data (try every owner first) =====
+    #   TIER 1  detailed inline layers, or the in-file library member that holds them
+    #           (own inline wins; else the (codeSpace, code) library member).
+    #   TIER 2  no layers but a uValue -> Material:NoMass (R = 1/U).
+    #   Both come out of _from_citygml (it returns "layers" for either case).
+    for owner_id, constr_el in candidates:
         code_info = _construction_code_info(doc, constr_el)
         code = code_info["value"]
         code_space = code_info["codeSpace"]
         name = _construction_name(doc, constr_el, code)
         reverse = constr_el is not None and local_name(constr_el) == "ReverseLayeredConstruction"
 
-        # (1) EXCEL by (codeSpace, code): if the curated DB knows this code, it wins.
-        if _excel_match(code, code_space, db):
-            resolved = _with_context(_from_excel(code, db, materials, reverse=reverse), owner_id)
-            _select_trace(trace, owner_id, constr_el, code_info, resolved["source"])
-            return name, resolved, trace
-
-        # Choose which element actually HOLDS the layers to drill:
-        #   (2) the construction's OWN inline layers win (most local); otherwise
-        #   (3) if it only NAMED a libraryCode, use the file's library member that
-        #       holds the layers (exact codeSpace+code). Reverse constructions are
-        #       left to _from_citygml, which follows their baseLayeredConstruction.
         drill_el = constr_el
         if code and not reverse and not _element_has_layers(doc, constr_el):
             member = _library_member_for_code(code, code_space, file_library)
             if member is not None and member is not constr_el and _element_has_layers(doc, member):
                 drill_el = member
 
-        # (2)/(3) inline or library-member layers, else (4) uValue -> NoMass.
-        resolved = _from_citygml(doc, drill_el, materials)
+        resolved = _from_citygml(doc, drill_el, materials)     # T1 layers, or T2 uValue
         if resolved.get("layers"):
             resolved = _with_context(resolved, owner_id)
             _select_trace(trace, owner_id, constr_el, code_info, resolved["source"])
             return name, resolved, trace
+
+    # ===== TIER 3 : EXTERNAL Excel/DB by (codeSpace, code) — LAST fallback =====
+    # ARCHETYPE placeholder (TABULA / UBEM-CARDs). This is only the code->Excel LOOKUP;
+    # the real archetype logic is NOT built (deferred: "raw converter first, archetypes
+    # LAST"). It fires ONLY here, after the CityGML tiers gave nothing. Raw data always
+    # beats a code. LATER (the real archetype rung): read the archetype KEY from the
+    # CityGML — the field(s) for building type/age (bldg:yearOfConstruction +
+    # bldg:function/usage, + nrg3:bdgType). FIRST confirm which ADE field carries the
+    # archetype (the open question the prof flagged); that field becomes the lookup key.
+    # Map (type, age-band) -> a construction in the EXTERNAL DB — we do NOT invent the
+    # numbers (TABULA / UBEM-CARDs, prepared by the teammate). construction_db.xlsx is
+    # only a PLACEHOLDER; swap it via SHEET_NAMES/COLUMN_MAP (its own columns, e.g.
+    # use_type/period/u_wall/…) with no pipeline change.
+    for owner_id, constr_el in candidates:
+        code_info = _construction_code_info(doc, constr_el)
+        code = code_info["value"]
+        code_space = code_info["codeSpace"]
+        if _excel_match(code, code_space, db):
+            name = _construction_name(doc, constr_el, code)
+            reverse = constr_el is not None and local_name(constr_el) == "ReverseLayeredConstruction"
+            resolved = _with_context(_from_excel(code, db, materials, reverse=reverse), owner_id)
+            _select_trace(trace, owner_id, constr_el, code_info, resolved["source"])
+            return name, resolved, trace
         if code:
-            warn(f"construction code '{code}' (codeSpace={code_space!r}) not in the Excel/DB, "
-                 f"not in the file's library, and the construction has no usable layers or uValue")
+            warn(f"construction code '{code}' (codeSpace={code_space!r}) has no CityGML "
+                 f"layers/uValue and is not in the Excel/DB")
 
-    #####################         EPC improvement #################
-
-    # 2b. FUTURE RUNG — NOT BUILT YET :
-    #     when a building has geometry but NO construction (e.g. a bare LOD1/1.2 box
-    #     like B1), DERIVE an archetype construction from the building's
-    #     bldg:yearOfConstruction + bldg:function/usage (+ nrg3:bdgType) -> a TABULA
-    #     archetype code -> look that code up in the Excel. It slots in HERE, BEFORE
-    #     the flat default, so poor files still get realistic materials. This needs
-    #     the BUILDING's attributes threaded down into _resolve_surface. Example:
-    #         arch = archetype_code(year, use)            # the old envelope_eff logic
-    #         if arch in db["constructions"]:
-    #             return arch, _from_excel(arch, db, materials)
-    #     (EPC-based thermal-zone splitting is a MUCH later step — out of scope now.)
-
-    materials.setdefault(DEFAULT_MATERIAL["name"], DEFAULT_MATERIAL)  # (5) default
+    # ===== TIER 4 : DEFAULT =====
+    materials.setdefault(DEFAULT_MATERIAL["name"], DEFAULT_MATERIAL)
     trace["source"] = "default"
-    trace["why_default"] = ("no reachable layeredConstruction matched the Excel/DB by (codeSpace, code), "
-                            "the file's own library, inline layers, or uValue")
+    trace["why_default"] = ("no CityGML detailed layers (T1), no uValue (T2), "
+                            "and no Excel/DB (codeSpace, code) match (T3)")
     return DEFAULT_NAME, {"source": "default", "layers": [DEFAULT_MATERIAL["name"]],
                           "layer_order": ADE_LAYER_ORDER}, trace
 

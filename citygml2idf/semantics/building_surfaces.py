@@ -25,6 +25,7 @@ here the points are raw but already wound OUTWARD.
 from __future__ import annotations
 
 import sys
+from enum import Enum
 
 from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, local_name
@@ -129,12 +130,11 @@ def _unique_ids(*ids):
 
 # Big Ladder / EnergyPlus docs list BuildingSurface:Detailed as a detailed surface object with Number of Vertices and vertex coordinates
 #  not as a container for several disconnected polygons
-def _split_surface_records(type_name, sid, rings_list, contexts):
-    """One parsed record per polygon, preserving the source BoundarySurface id."""
-    part_count = len(rings_list)
-    for index, ring in enumerate(rings_list, start=1):
-        split_id = sid if part_count == 1 else f"{sid}__part{index}"
-        yield (type_name, split_id, ring, _unique_ids(sid, *contexts), sid, index, part_count)
+def _surface_records(type_name, sid, rings_list, contexts):
+    """One parsed record per surface
+    """
+    for ring in rings_list[:1]:                  # [:1] -> the single polygon; never split
+        yield (type_name, sid, ring, _unique_ids(sid, *contexts), sid, 1, 1)
 
 
 def _thermal_zone_ids(doc, holder):
@@ -171,7 +171,7 @@ def _labeled_surfaces(doc, building):
             if surf is None:
                 continue
             sid = surf.get(GML_ID)
-            out.extend(_split_surface_records(local_name(surf), sid, _surface_rings(doc, surf), contexts))
+            out.extend(_surface_records(local_name(surf), sid, _surface_rings(doc, surf), contexts))
     return out
 
 
@@ -216,10 +216,11 @@ def _thermal_boundary_surfaces(doc, building):
                     continue
                 sid = surf.get(GML_ID)
                 key = sid or id(surf)
+                # prevent from duplication
                 if key in seen:
                     continue
                 seen.add(key)
-                out.extend(_split_surface_records(local_name(surf), sid, _surface_rings(doc, surf), contexts))
+                out.extend(_surface_records(local_name(surf), sid, _surface_rings(doc, surf), contexts))
     return out
 
 
@@ -279,40 +280,71 @@ def _solid_faces(doc, building, lod):
     return out
 
 
-# Geometry selection cascade:
-# 1. explicit ADE thermalBoundary surfaces when present and not coincident hull;
-# 2. CityGML bldg:boundedBy hull surfaces for normal shell or coincident hull;
-# 3. raw selected-LoD solid/multisurface faces, mainly LoD1 fallback.
-def surfaces_of_building(doc, building):
-    """Return (lod, surfaces) for one building, as the uniform surface list
-            If thermalBoundary exists -> use it.
-            Else if boundedBy exists -> use it.
-            Else use raw solid  """
-    lod = detect_lod(doc, building)
-    thermal = _thermal_boundary_surfaces(doc, building)
-    labeled = thermal if thermal else _labeled_surfaces(doc, building)
-    raw = labeled if labeled else _solid_faces(doc, building, lod)   # labeled wins (richer)
-    if lod == 0 and not raw:
-        xml_io.warn(f"building {building.get(GML_ID)}: LoD0 footprint/roof edge cannot produce IDF thermal surfaces; skipped")
+class SurfacePath(Enum):
+    """WHICH source a building's surfaces came from (recorded in the trace).
 
+    Priority = most-detailed first. NOTE: "coincides-with-hull" is NOT a separate
+    path — a hull-coincident zone exposes no thermalBoundary, so it simply falls
+    through to CITYGML_BUILDING_SHELL.
+    """
+    ENERGY_ADE_BOUNDARIES = "energy_ade_boundaries"    # nrg3:ThermalZone -> thermalBoundary (RICH)
+    CITYGML_BUILDING_SHELL = "citygml_building_shell"  # bldg:boundedBy thematic surfaces (RICH)
+    RAW_SOLID_FALLBACK = "raw_solid_fallback"          # classify lodNSolid faces by normal (POOR)
+    NONE = "none"                                      # no usable envelope (e.g. LoD0 footprint only)
+
+
+# Geometry selection cascade — pick ONE source, most-detailed first:
+#   1. explicit ADE thermalBoundary surfaces (coincident-hull zones expose none);
+#   2. CityGML bldg:boundedBy shell surfaces (also the coincident-hull case);
+#   3. raw selected-LoD solid faces, mainly the LoD1 fallback;
+#   otherwise NONE — nothing usable (e.g. a LoD0 footprint-only building).
+def select_surface_path(doc, building, lod):
+    """Return (SurfacePath, raw_records) for one building. NONE + [] when no source
+    yields surfaces, so the caller can still trace the building yet emit no IDF."""
+    thermal = _thermal_boundary_surfaces(doc, building)
+    if thermal:
+        return SurfacePath.ENERGY_ADE_BOUNDARIES, thermal
+    shell = _labeled_surfaces(doc, building)
+    if shell:
+        return SurfacePath.CITYGML_BUILDING_SHELL, shell
+    solid = _solid_faces(doc, building, lod)
+    if solid:
+        return SurfacePath.RAW_SOLID_FALLBACK, solid
+    return SurfacePath.NONE, []
+
+
+def process_surfaces(raw):
+    """Turn raw (type_name, sid, ring, …) records into the uniform surface list:
+    orient each face OUTWARD, give it a role, drop degenerate/unmapped faces (warned).
+    PURE geometry/semantics — no XML, no doc."""
     # Interior reference point = centroid of ALL this building's vertices, used to
     # orient every face's normal OUTWARD (we never trust the file's winding).
     all_pts = [p for (_, _, ring, _, _, _, _) in raw for p in rings.drop_closing_point(ring)]
-    interior = rings.centroid(all_pts) if all_pts else None
+    interior = rings.centroid(all_pts) if all_pts else None   # AVERAGE of all the building's corners
 
     surfaces = []
     for type_name, sid, ring, construction_context_ids, source_gml_id, part_index, part_count in raw:
-        if interior is None or len(rings.drop_closing_point(ring)) < 3:
+        if interior is None or len(rings.drop_closing_point(ring)) < 3:  # not a real polygon -> ignore
             xml_io.warn(f"surface {sid}: fewer than 3 points; skipped")
             continue
         oriented, normal = rings.orient_outward(ring, interior)
 
+        if type_name in surface_types.SKIP_TYPES:  # DECIDED-virtual (e.g. ClosureSurface):
+            xml_io.warn(f"surface {sid}: virtual '{type_name}'; skipped (no physics)")
+            continue
+
         if type_name is None:                      # LOD1 -> role from geometry
             rule = surface_types.rule_for_role(classify.classify_by_normal(normal))
-        else:                                      # LOD2/3 -> role from type
+        else:                                      # LOD2/3 -> role from the labeled type
             rule = surface_types.rule_for_type(type_name)
-        if rule is None:                           # unknown / not-yet-decided type
-            xml_io.warn(f"surface {sid}: type '{type_name}' not mapped; skipped")
+            if rule is None:                       # labeled but UNMAPPED: never DROP the
+                # geometry and never blind-guess "wall" — classify it by the outward
+                # normal (like LoD1). zones.py still fixes interzone boundaries.
+                rule = surface_types.rule_for_role(classify.classify_by_normal(normal))
+                xml_io.warn(f"surface {sid}: type '{type_name}' not mapped; "
+                            f"classified by geometry as '{rule.role if rule else 'unknown'}'")
+        if rule is None:                           # truly unresolvable -> skip (never crash)
+            xml_io.warn(f"surface {sid}: could not resolve type '{type_name}'; skipped")
             continue
 
         surfaces.append({
@@ -328,14 +360,31 @@ def surfaces_of_building(doc, building):
             "points": [list(p) for p in oriented],
             "construction_context_ids": construction_context_ids,
         })
-    return lod, surfaces
+    return surfaces
+
+
+def surfaces_of_building(doc, building):
+    """Return (lod, path, surfaces) for one building as the uniform surface list.
+
+    `path` (SurfacePath) records WHICH source was used — kept in the trace for audit.
+    A NONE path (no usable envelope, e.g. LoD0) yields an empty surface list: the
+    building stays in the trace but reader.to_idf_middle_layer drops it from the IDF
+    view, so the writer never emits a zone-with-no-surfaces IDF.
+    """
+    lod = detect_lod(doc, building)
+    path, raw = select_surface_path(doc, building, lod)
+    if path is SurfacePath.NONE:
+        xml_io.warn(f"building {building.get(GML_ID)}: no usable envelope surfaces "
+                    f"(LoD0 footprint only / no thermalBoundary / boundedBy / solid); "
+                    f"kept in trace, no IDF written")
+    return lod, path, process_surfaces(raw)
 
 
 def _demo(path=None):
     doc = xml_io.CityGMLDoc(path or xml_io.DEFAULT_INPUT)
     for b in xml_io.buildings(doc):
-        lod, surfs = surfaces_of_building(doc, b)
-        print(f"{b.get(GML_ID)}  LOD{lod}  {len(surfs)} surfaces")
+        lod, path_used, surfs = surfaces_of_building(doc, b)
+        print(f"{b.get(GML_ID)}  LOD{lod}  [{path_used.value}]  {len(surfs)} surfaces")
         for s in surfs:
             area = rings.polygon_area(s["points"])
             print(f"   {s['source_id']:<18} {s['type_name']:<24} {s['role']:<18}"
