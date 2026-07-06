@@ -68,7 +68,8 @@ def new_empty_idf(with_weather=False):
     idf.newidfobject("TIMESTEP", Number_of_Timesteps_per_Hour=4)
     idf.newidfobject("BUILDING", Name="Building", North_Axis=0.0, Terrain="City",
                      Solar_Distribution="FullExterior",
-                     Maximum_Number_of_Warmup_Days=25, Minimum_Number_of_Warmup_Days=6)
+                     # real thermal mass (proper cp) converges slower -> allow more warmup days
+                     Maximum_Number_of_Warmup_Days=50, Minimum_Number_of_Warmup_Days=6)
     idf.newidfobject("GLOBALGEOMETRYRULES", Starting_Vertex_Position="UpperLeftCorner",
                      Vertex_Entry_Direction="Counterclockwise", Coordinate_System="World")
     idf.newidfobject("SIMULATIONCONTROL",
@@ -283,7 +284,7 @@ def run_energyplus(idf_path, weather=WEATHER_EPW, out_dir=None):
 
 
 def main(path=None):
-    doc = xml_io.CityGMLDoc(path or xml_io.DEFAULT_INPUT)
+    doc = xml_io.CityGMLDoc(path)
     middle = build_idf_middle_layer(doc)
     cons, mats = middle.constructions, middle.materials
     for b in middle.buildings:

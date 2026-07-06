@@ -1,5 +1,7 @@
 """
-model/zones.py — thermal zones (the G12 / G13 rules). Gated by `config.FORCE_SINGLE_ZONE`.
+model/zones.py — thermal zones (the G12 / G13 rules). PRESENCE-BASED (the ADE object
+is primary): one E+ Zone per nrg3:ThermalZone; one implicit zone only when the file
+declares no ThermalZone.
 
 THE ENERGY ADE OBJECT IS PRIMARY (presence-driven, NOT LOD-driven): the zone list comes
 from `nrg3:ThermalZone`, not from the geometric LOD. Each `ThermalZone` -> one EnergyPlus
@@ -18,8 +20,8 @@ type name:
 A zone with `nrg3:coincidesWithLodXHull = true` OWNS THE WHOLE BUILDING SHELL (G13): its
 partial `thermalBoundary` list is ignored and it takes every bldg surface (B2's case).
 
-No `ThermalZone` in the file, OR `FORCE_SINGLE_ZONE` -> ONE implicit zone = the whole
-building (the LoD1 fallback; Stages 1-2). `nrg3:volume` -> the E+ Zone Volume when present,
+No `ThermalZone` in the file -> ONE implicit zone = the whole
+building (the LoD1 fallback). `nrg3:volume` -> the E+ Zone Volume when present,
 otherwise EnergyPlus autocalculates it from the (now enclosing) surfaces.
 
 Sources: RULES_code.md G12 (interzone by zone count; explicit Surface pair = the documented
@@ -34,7 +36,6 @@ import sys
 
 import numpy as np
 
-from .. import config
 from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, warn
 from ..geometry import rings
@@ -50,14 +51,28 @@ def thermal_zones(doc, building_element):
     return doc.descendants(building_element, "nrg", "ThermalZone")
 
 
-def zone_volume(doc, zone_element):
+def zone_volume_with_trace(doc, zone_element):
     # WHAT: nrg3:volume -> QualifiedVolume/value (m3); None -> E+ autocalculates.
     # REF : ADE QualifiedVolume; feeds E+ IDD Zone "Volume" field (else autocalculate).
     volume_property = doc.children(zone_element, "nrg", "volume")
     if not volume_property:
-        return None
+        return None, {"value": None, "unit": "m3", "source": "autocalculate",
+                      "reason": "nrg3:volume not provided by CityGML"}
     value_elements = doc.descendants(volume_property[0], "nrg", "value")
-    return to_number(value_elements[0].text) if value_elements else None
+    if not value_elements:
+        return None, {"value": None, "unit": "m3", "source": "autocalculate",
+                      "reason": "nrg3:volume has no nrg3:value"}
+    value_element = value_elements[0]
+    raw = to_number(value_element.text)
+    uom = (value_element.get("uom") or "").strip()
+    return raw, {"raw": raw, "raw_uom": uom or None,
+                 "value": raw, "unit": "m3", "source": "citygml",
+                 "field": "nrg3:volume/nrg3:QualifiedVolume/nrg3:value",
+                 "conversion": "direct; expected m3"}
+
+
+def zone_volume(doc, zone_element):
+    return zone_volume_with_trace(doc, zone_element)[0]
 
 
 def coincides_with_hull(doc, zone_element):
@@ -120,18 +135,29 @@ def make_partner(surface, partner_zone_name, partner_name, middle):
         "zone": partner_zone_name,
         "points": [list(point) for point in reversed(surface["points"])],
         "area": surface.get("area"),
+        "zone_trace": {"assigned_zone": partner_zone_name,
+                       "boundary": "Surface",
+                       "source": "generated_interzone_partner",
+                       "paired_with": surface["source_id"]},
     }
 
 
 def _single_zone(building):
     # WHAT: one implicit E+ Zone = the whole building; every surface keeps its own
-    #       exterior boundary. Used when there is no ThermalZone or FORCE_SINGLE_ZONE.
+    #       exterior boundary. Used when there is no ThermalZone in the file.
     # REF : RULES G13 (LoD1 fallback) + config flag (Stages 1-2, the current writer path).
     zone_name = f"{building['id']}_Zone"
-    building["zones"] = [{"name": zone_name, "volume": None}]
+    building["zones"] = [{"name": zone_name, "volume": None,
+                          "trace": {"name": {"value": zone_name, "source": "implicit"},
+                                    "volume": {"value": None, "unit": "m3",
+                                               "source": "autocalculate",
+                                               "reason": "no nrg3:ThermalZone in CityGML"}}}]
     for surface in building["surfaces"]:
         surface["zone"] = zone_name
         surface["boundary_object"] = ""
+        surface["zone_trace"] = {"assigned_zone": zone_name,
+                                 "source": "implicit_single_zone",
+                                 "owner_count": 1}
 
 
 def assign_zones(doc, middle):
@@ -148,7 +174,7 @@ def assign_zones(doc, middle):
             source_to_surface_ids.setdefault(surface["source_id"], set()).add(surface["source_id"])
             source_to_surface_ids.setdefault(surface.get("source_gml_id") or surface["source_id"], set()).add(surface["source_id"])
 
-        zone_elements = [] if config.FORCE_SINGLE_ZONE else thermal_zones(doc, doc.get_by_id(building["id"]))
+        zone_elements = thermal_zones(doc, doc.get_by_id(building["id"]))
         if not zone_elements:
             _single_zone(building)
             continue
@@ -157,14 +183,28 @@ def assign_zones(doc, middle):
         zones = []
         for zone_element in zone_elements:
             name = zone_element.get(GML_ID) or f"{building['id']}_Zone{len(zones) + 1}"
-            if coincides_with_hull(doc, zone_element):
+            volume, volume_trace = zone_volume_with_trace(doc, zone_element)
+            coincides = coincides_with_hull(doc, zone_element)
+            referenced_ids = []
+            if coincides:
                 owned_ids = set(building_surface_ids)  # the zone OWNS THE WHOLE SHELL
+                ownership_source = "coincidesWithLodXHull"
             else:
                 owned_ids = set()
-                for sid in boundary_surface_ids(doc, zone_element):
+                referenced_ids = boundary_surface_ids(doc, zone_element)
+                for sid in referenced_ids:
                     owned_ids.update(source_to_surface_ids.get(sid, set()))
-            zones.append({"name": name, "volume": zone_volume(doc, zone_element), "ids": owned_ids})
-        building["zones"] = [{"name": zone["name"], "volume": zone["volume"]} for zone in zones]
+                ownership_source = "nrg3:thermalBoundary"
+            zones.append({"name": name, "volume": volume, "ids": owned_ids,
+                          "trace": {"name": {"raw": zone_element.get(GML_ID),
+                                             "value": name,
+                                             "source": "ThermalZone gml:id"},
+                                    "volume": volume_trace,
+                                    "ownership": {"source": ownership_source,
+                                                  "referenced_surface_ids": referenced_ids,
+                                                  "owned_surface_ids": sorted(owned_ids)}}})
+        building["zones"] = [{"name": zone["name"], "volume": zone["volume"],
+                              "trace": zone["trace"]} for zone in zones]
 
         # zone centroid (orientation-independent) for re-orienting interzone faces
         surfaces_by_id = {surface["source_id"]: surface for surface in surfaces}
@@ -189,25 +229,38 @@ def assign_zones(doc, middle):
                 surface["boundary"] = "Surface"
                 partner_name = surface["source_id"] + "_pair"
                 surface["boundary_object"] = partner_name
+                surface["zone_trace"] = {"assigned_zone": owner_zone["name"],
+                                         "owner_count": len(owners),
+                                         "boundary": "Surface",
+                                         "paired_zone": partner_zone["name"],
+                                         "paired_surface": partner_name,
+                                         "source": "shared_by_multiple_zones"}
                 partner_surfaces.append(make_partner(surface, partner_zone["name"], partner_name, middle))
                 if len(owners) > 2:
                     warn(f"surface {surface['source_id']} shared by {len(owners)} zones; using first two")
             elif len(owners) == 1:                               # exterior -> keep type boundary
                 surface["zone"] = owners[0]["name"]
                 surface["boundary_object"] = ""
+                surface["zone_trace"] = {"assigned_zone": owners[0]["name"],
+                                         "owner_count": 1,
+                                         "boundary": surface["boundary"],
+                                         "source": "single ThermalZone owns surface"}
             else:                                                # orphan -> never drop geometry
                 warn(f"surface {surface['source_id']} in no ThermalZone; placed in {zones[0]['name']}")
                 surface["zone"] = zones[0]["name"]
                 surface["boundary_object"] = ""
+                surface["zone_trace"] = {"assigned_zone": zones[0]["name"],
+                                         "owner_count": 0,
+                                         "boundary": surface["boundary"],
+                                         "source": "orphan_fallback"}
         surfaces.extend(partner_surfaces)                        # add the reciprocal twins
     return middle
 
 
 def _demo(path=None):
     from .reader import build_middle_layer
-    doc = xml_io.CityGMLDoc(path or xml_io.DEFAULT_INPUT)
+    doc = xml_io.CityGMLDoc(path)
     middle = build_middle_layer(doc)            # build_middle_layer already calls assign_zones
-    print(f"FORCE_SINGLE_ZONE={config.FORCE_SINGLE_ZONE}")
     for building in middle["buildings"]:
         zone_names = [zone["name"] for zone in building.get("zones", [])]
         print(f"  {building['id']}: {len(zone_names)} zone(s) {zone_names}")
@@ -219,4 +272,3 @@ def _demo(path=None):
 
 if __name__ == "__main__":
     _demo(sys.argv[1] if len(sys.argv) > 1 else None)
-

@@ -1,19 +1,16 @@
 """
-model/openings.py — windows (the W rules). Gated by `config.ENABLE_WINDOWS`.
-
-For each EXTERIOR wall, the richest->poorest cascade (W1):
+ windows  the window as geometry 
+For each EXTERIOR wall, the richest->poorest cascade:
   A. explicit `bldg:Window` geometry (LoD3, via `bldg:opening`) -> use the real polygon
   B. `nrg3:bdgBdrySurfOpeningToSurfaceRatio` (WWR)              -> synthesize a window
   C. `(totalSurfaceArea - opaqueSurfaceArea)/totalSurfaceArea`  -> synthesize a window
-  D. `config.DEFAULT_WWR` (TEST-ONLY; None in production)       -> synthesize a window
-  E. none                                                       -> opaque (no window)
+  D. none                                                       -> opaque (no window)
 
-A window is NEVER invented in production (golden rule, W1.4): branch D fires only when a
-test explicitly sets DEFAULT_WWR. Doors are skipped -> opaque for now (W5).
+Doors are skipped -> opaque for now
 
-Glazing construction = ONE default `SimpleGlazingSystem` from the Excel `windows` sheet
-(U-Factor <- u_value, SHGC <- g_value -- **g<->SHGC UNVERIFIED**, W3). Per-window
-construction by explicit reference is a later refinement.
+Glazing construction = ONE default `SimpleGlazingSystem` (FALLBACK_WINDOW). Reading the
+real per-window glazing physics (uValue / gValue / transmittance) from the CityGML is a
+scoped later refinement;
 """
 
 from __future__ import annotations
@@ -21,32 +18,20 @@ from __future__ import annotations
 import math
 import sys
 
-import pandas as pd
-
-from .. import config
 from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, local_name, warn
 from ..geometry import rings
-from . import constructions
-from .constructions import _child_text as child_text_value, _num as to_number   # reuse helpers
+from .citygml_read import _child_measure
 
-DEFAULT_DATABASE = constructions.DEFAULT_DB
 FALLBACK_WINDOW = {"name": "DEFAULT_WINDOW", "u_factor": 2.8, "shgc": 0.7}   # last resort
 MAX_WINDOW_TO_WALL_RATIO = 0.95   # keep a synthesized window strictly inside its wall
 
 
-def default_window_construction(database_path=DEFAULT_DATABASE):
-    """One default glazing from the Excel `windows` sheet (first row) -> a
-    SimpleGlazingSystem (U-Factor <- u_value, SHGC <- g_value, W3)."""
-    try:
-        windows_sheet = pd.read_excel(database_path, sheet_name=constructions.SHEET_NAMES["windows"])
-        first_row = windows_sheet.iloc[0]
-        return {"name": str(first_row[constructions.COLUMN_MAP["code"]]),
-                "u_factor": float(first_row[constructions.COLUMN_MAP["u_value"]]),
-                "shgc": float(first_row[constructions.COLUMN_MAP["g_value"]])}
-    except Exception as error:
-        warn(f"window sheet unreadable ({type(error).__name__}: {error}); using fallback glazing")
-        return dict(FALLBACK_WINDOW)
+def default_window_construction():
+    """The one default glazing (FALLBACK_WINDOW) -> a SimpleGlazingSystem
+    (U-Factor <- u_factor, SHGC <- shgc). Used until the real per-window glazing physics
+    is read from the CityGML (scoped later)."""
+    return dict(FALLBACK_WINDOW)
 
 
 def window_ring(doc, window_element):
@@ -75,7 +60,15 @@ def explicit_windows(doc, wall_element, origin_offset):
             found_windows.append({"source_id": window_element.get(GML_ID) or "window",
                                   "points": recentred_points,
                                   "area": round(rings.polygon_area(recentred_points), 3),
-                                  "from": "explicit"})
+                                  "from": "explicit",
+                                  "trace": {
+                                      "source": "explicit_lod3_geometry",
+                                      "source_gml_id": window_element.get(GML_ID),
+                                      "origin_offset": [float(offset_x), float(offset_y), float(offset_z)],
+                                      "area": {"value": round(rings.polygon_area(recentred_points), 3),
+                                               "unit": "m2",
+                                               "source": "derived_from_explicit_window_points"},
+                                  }})
         else:
             warn(f"window {window_element.get(GML_ID) or '(no id)'} has no LoD3 geometry; falling back to ratios/areas")
     return found_windows
@@ -83,14 +76,55 @@ def explicit_windows(doc, wall_element, origin_offset):
 # LOD 2
 def window_to_wall_ratio_from_attributes(doc, wall_element):
     """B/C: openingToSurfaceRatio, else (total - opaque)/total. None if neither given."""
-    stated_ratio = to_number(child_text_value(doc, wall_element, "nrg", "bdgBdrySurfOpeningToSurfaceRatio")) # known as WWR
+    stated_ratio, stated_uom = _child_measure(doc, wall_element, "nrg", "bdgBdrySurfOpeningToSurfaceRatio")
     if stated_ratio is not None:
-        return stated_ratio
-    total_area = to_number(child_text_value(doc, wall_element, "nrg", "bdgBdrySurfTotalSurfaceArea"))
-    opaque_area = to_number(child_text_value(doc, wall_element, "nrg", "bdgBdrySurfOpaqueSurfaceArea"))
+        return stated_ratio, {
+            "source": "citygml",
+            "field": "nrg3:bdgBdrySurfOpeningToSurfaceRatio",
+            "raw": stated_ratio,
+            "raw_uom": stated_uom or None,
+            "value": stated_ratio,
+            "unit": "ratio",
+            "conversion": "direct_ratio",
+        }
+    total_area, total_uom = _child_measure(doc, wall_element, "nrg", "bdgBdrySurfTotalSurfaceArea")
+    opaque_area, opaque_uom = _child_measure(doc, wall_element, "nrg", "bdgBdrySurfOpaqueSurfaceArea")
     if total_area and opaque_area is not None and total_area > 0:
-        return max(0.0, (total_area - opaque_area) / total_area)
-    return None
+        ratio = max(0.0, (total_area - opaque_area) / total_area)
+        return ratio, {
+            "source": "citygml",
+            "field": "nrg3:bdgBdrySurfTotalSurfaceArea - nrg3:bdgBdrySurfOpaqueSurfaceArea",
+            "totalSurfaceArea": {"raw": total_area, "raw_uom": total_uom or None,
+                                 "value": total_area, "unit": "m2"},
+            "opaqueSurfaceArea": {"raw": opaque_area, "raw_uom": opaque_uom or None,
+                                  "value": opaque_area, "unit": "m2"},
+            "value": ratio,
+            "unit": "ratio",
+            "conversion": "(totalSurfaceArea - opaqueSurfaceArea) / totalSurfaceArea",
+        }
+    return None, {"source": "none", "reason": "no opening ratio or total/opaque areas on wall"}
+
+
+def _window_synthesis_trace(wall_points, window_points, requested_ratio, ratio_trace):
+    corners = rings.drop_closing_point(wall_points)
+    center = [sum(corner[i] for corner in corners) / len(corners) for i in range(3)]
+    effective_ratio = min(max(requested_ratio, 0.0), MAX_WINDOW_TO_WALL_RATIO)
+    scale = math.sqrt(effective_ratio)
+    wall_area = round(rings.polygon_area(corners), 3)
+    window_area = round(rings.polygon_area(window_points), 3)
+    return {
+        "source": "wwr",
+        "ratio": ratio_trace,
+        "method": "scale_host_wall_polygon_about_center",
+        "wall_area": {"value": wall_area, "unit": "m2",
+                      "source": "derived_from_host_wall_points"},
+        "requested_ratio": requested_ratio,
+        "effective_ratio": effective_ratio,
+        "scale_factor": scale,
+        "wall_center": center,
+        "area": {"value": window_area, "unit": "m2",
+                 "formula": "wall_area * effective_ratio"},
+    }
 
 
 def synthesize_window(wall_points, window_to_wall_ratio):
@@ -112,28 +146,23 @@ def windows_for_wall(doc, wall_element, wall_points, origin_offset):
     if windows_from_geometry:                                            # A
         return windows_from_geometry
 
-    window_to_wall_ratio = window_to_wall_ratio_from_attributes(doc, wall_element)   # B / C
+    window_to_wall_ratio, ratio_trace = window_to_wall_ratio_from_attributes(doc, wall_element)   # B / C
     source = "wwr"
-    if window_to_wall_ratio is None and config.DEFAULT_WWR is not None:              # D (test-only)
-        window_to_wall_ratio, source = config.DEFAULT_WWR, "DEFAULT_WWR(test)"
-
     if window_to_wall_ratio and window_to_wall_ratio > 0:
         window_points = synthesize_window(wall_points, window_to_wall_ratio)
         return [{"source_id": (wall_element.get(GML_ID) or "wall") + "_win",
                  "points": window_points,
                  "area": round(rings.polygon_area(window_points), 3),
-                 "wwr": round(window_to_wall_ratio, 3), "from": source}]
+                 "wwr": round(window_to_wall_ratio, 3), "from": source,
+                 "trace": _window_synthesis_trace(wall_points, window_points,
+                                                  window_to_wall_ratio, ratio_trace)}]
     return []                                                            # E
 
 
-def resolve_windows(doc, middle, database_path=DEFAULT_DATABASE):
-    """Attach windows to exterior walls in the middle layer (gated by ENABLE_WINDOWS),
-    and record the one default glazing construction. No-op when windows are off."""
-    if not config.ENABLE_WINDOWS:
-        middle["window_construction"] = None
-        return None
-
-    glazing = default_window_construction(database_path)
+def resolve_windows(doc, middle):
+    """Attach windows to exterior walls in the middle layer, and record the one default
+    glazing construction. Presence-based: only walls that carry a real window source."""
+    glazing = default_window_construction()
     any_window = False
     for building in middle["buildings"]:
         origin_offset = building.get("origin_offset", [0.0, 0.0, 0.0])
@@ -157,10 +186,9 @@ def resolve_windows(doc, middle, database_path=DEFAULT_DATABASE):
 
 def _demo(path=None):
     from .reader import build_middle_layer
-    doc = xml_io.CityGMLDoc(path or xml_io.DEFAULT_INPUT)
+    doc = xml_io.CityGMLDoc(path)
     middle = build_middle_layer(doc)            # build_middle_layer already calls resolve_windows
-    print(f"ENABLE_WINDOWS={config.ENABLE_WINDOWS}  DEFAULT_WWR={config.DEFAULT_WWR}  "
-          f"window_construction={middle.get('window_construction')}")
+    print(f"window_construction={middle.get('window_construction')}")
     for building in middle["buildings"]:
         windows = [(surface["source_id"], window["from"], window["area"])
                    for surface in building["surfaces"] for window in surface.get("windows", [])]
@@ -169,4 +197,3 @@ def _demo(path=None):
 
 if __name__ == "__main__":
     _demo(sys.argv[1] if len(sys.argv) > 1 else None)
-

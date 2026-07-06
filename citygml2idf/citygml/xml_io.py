@@ -56,7 +56,6 @@ GML_ID = f"{{{NS['gml']}}}id"
 # paths correct no matter how deep we nest the readers.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PKG = os.path.dirname(_HERE)                      # citygml2idf/
-DEFAULT_INPUT = os.path.join(_PKG, "input", "sample_energyADE.gml")
 
 
 # WHY: robustness rule (carried over from the CityJSON work) — never crash
@@ -80,6 +79,9 @@ class CityGMLDoc:
     a resolved namespace map and a gml:id -> element registry."""
 
     def __init__(self, path):
+        if not path:
+            raise SystemExit("CityGMLDoc: a CityGML/.gml path is required - pass one, e.g.\n"
+                             "  python -m citygml2idf.run citygml2idf/input/cases/case_2_1_lod2_1zone.gml")
         self.path = path
         # WHY: tolerant parser — strip insignificant whitespace, allow big trees,
         # and do NOT fetch external entities (safer + faster).
@@ -272,7 +274,6 @@ def build_schema(entry_xsd=ENERGY_XSD):
 def validate(path=None, entry_xsd=ENERGY_XSD, max_report=15):
     """Best-effort schema validation. Returns True/False when validation could
     run, or None when the schema couldn't even be built (then we just warn)."""
-    path = path or DEFAULT_INPUT
     try:
         schema = build_schema(entry_xsd)
     except Exception as e:
@@ -296,7 +297,6 @@ def validate(path=None, entry_xsd=ENERGY_XSD, max_report=15):
 # === demo ====================================================================
 
 def _demo(path=None):
-    path = path or DEFAULT_INPUT
     validate(path)                       # best-effort schema gate (warns, never blocks)
     doc = CityGMLDoc(path)
     print(f"Loaded            : {os.path.basename(path)}")

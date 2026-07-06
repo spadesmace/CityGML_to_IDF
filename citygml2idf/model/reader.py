@@ -1,5 +1,6 @@
 """
-model/reader.py - assemble writer-neutral middle layers from the parsers.
+what id does : 
+assemble writer middle layers from the parsers.
 
 The parser has one path and two views:
 
@@ -74,7 +75,15 @@ def build_trace_middle_layer(doc):
         for s in bld["surfaces"]:
             s["points"] = [[float(x - ox), float(y - oy), float(z - oz)]
                            for (x, y, z) in s["points"]]
-            s["area"] = round(rings.polygon_area(s["points"]), 3)
+            s["area"] = round(rings.polygon_area(s["points"]), 3) #is computed from the polygon points
+            s["geometry_trace"] = {
+                "points": {"source": "gml:posList",
+                           "processing": ["outward_orientation", "optional_crs_reprojection",
+                                          "building_origin_recenter"]},
+                "origin_offset": [float(ox), float(oy), float(oz)],
+                "area": {"value": s["area"], "unit": "m2",
+                         "source": "derived_from_recentered_points"},
+            }
         bld["origin_offset"] = [float(ox), float(oy), float(oz)]
 
     middle = {
@@ -227,7 +236,7 @@ def write_middle_layer(doc, out_path=None, view="trace"):
 
 
 def _demo(path=None):
-    doc = xml_io.CityGMLDoc(path or xml_io.DEFAULT_INPUT)
+    doc = xml_io.CityGMLDoc(path)
     trace_middle, idf_middle = build_both_middle_layers(doc)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     trace_path = os.path.join(OUTPUT_DIR, "middle_layer_trace.json")
@@ -254,4 +263,3 @@ def _demo(path=None):
 
 if __name__ == "__main__":
     _demo(sys.argv[1] if len(sys.argv) > 1 else None)
-

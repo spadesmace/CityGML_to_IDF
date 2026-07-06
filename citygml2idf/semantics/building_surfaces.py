@@ -329,10 +329,6 @@ def process_surfaces(raw):
             continue
         oriented, normal = rings.orient_outward(ring, interior)
 
-        if type_name in surface_types.SKIP_TYPES:  # DECIDED-virtual (e.g. ClosureSurface):
-            xml_io.warn(f"surface {sid}: virtual '{type_name}'; skipped (no physics)")
-            continue
-
         if type_name is None:                      # LOD1 -> role from geometry
             rule = surface_types.rule_for_role(classify.classify_by_normal(normal))
         else:                                      # LOD2/3 -> role from the labeled type
@@ -347,18 +343,25 @@ def process_surfaces(raw):
             xml_io.warn(f"surface {sid}: could not resolve type '{type_name}'; skipped")
             continue
 
+        surface_type = surface_types.resolve_floor_ceiling(rule.surface_type, normal[2])
         surfaces.append({
             "source_id": sid,
             "source_gml_id": source_gml_id,
-            "surface_part_index": part_index,
-            "surface_part_count": part_count,
             "type_name": type_name or "classified",
             "role": rule.role,
             # FloorOrCeiling is resolved to a concrete E+ keyword by the normal's z
-            "surface_type": surface_types.resolve_floor_ceiling(rule.surface_type, normal[2]),
+            "surface_type": surface_type,
             "boundary": rule.boundary,
             "points": [list(p) for p in oriented],
             "construction_context_ids": construction_context_ids,
+            "semantic_trace": {
+                "source_type_name": type_name,
+                "rule_source": "CityGML/ADE surface type" if type_name else "geometry normal classification",
+                "role": rule.role,
+                "surface_type": surface_type,
+                "boundary": rule.boundary,
+                "outward_normal": [float(v) for v in normal],
+            },
         })
     return surfaces
 
@@ -381,7 +384,7 @@ def surfaces_of_building(doc, building):
 
 
 def _demo(path=None):
-    doc = xml_io.CityGMLDoc(path or xml_io.DEFAULT_INPUT)
+    doc = xml_io.CityGMLDoc(path)
     for b in xml_io.buildings(doc):
         lod, path_used, surfs = surfaces_of_building(doc, b)
         print(f"{b.get(GML_ID)}  LOD{lod}  [{path_used.value}]  {len(surfs)} surfaces")
@@ -393,4 +396,3 @@ def _demo(path=None):
 
 if __name__ == "__main__":
     _demo(sys.argv[1] if len(sys.argv) > 1 else None)
-

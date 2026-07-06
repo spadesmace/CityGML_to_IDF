@@ -13,12 +13,9 @@ from __future__ import annotations
 
 import math
 
-import pandas as pd
-
 from ..citygml.xml_io import warn
 
 # EnergyPlus minimum for Material.Specific Heat is 100 J/kg-K (Energy+.idd).
-# One source of truth: DEFAULT_MATERIAL["specific_heat"] reuses this value.
 MIN_SPECIFIC_HEAT = 100.0
 
 
@@ -41,12 +38,9 @@ def _str(v, default=None):
 
 
 def _trace_value(v):
-    """JSON-safe raw trace value: pandas blanks/NaN become null."""
-    try:
-        if pd.isna(v):
-            return None
-    except (TypeError, ValueError):
-        pass
+    """JSON-safe raw trace value: blanks/NaN -> null; numpy scalars unwrapped."""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
     if hasattr(v, "item"):
         try:
             return v.item()
@@ -98,11 +92,13 @@ def _density_to_kg_per_m3(value, uom, context="density"):
 
 
 def _specific_heat_to_j_per_kg_k(value, uom, context="specific heat"):
-    """EnergyPlus Material requires specific heat in J/kg-K and at least 100 due to Energy+.idd"""
+    """EnergyPlus Material requires specific heat in J/(kg-K), minimum 100 (Energy+.idd).
+    A value in kJ/(kg-K) — flagged by the unit, OR by being far below any real material
+    (a real cp is ~800-2000, so anything < 10 must be kJ) — is multiplied by 1000."""
     if value is None:
         return None
-    unit = (uom or "J/kg-K").strip().lower().replace(" ", "")
-    if "kj" in unit:
+    unit = (uom or "").strip().lower().replace(" ", "")
+    if "kj" in unit or value < 10.0:                 # kJ/(kg-K) -> J/(kg-K)
         value *= 1000.0
     if value < MIN_SPECIFIC_HEAT:
         warn(f"{context}: value {value} J/kg-K is below EnergyPlus minimum; using minimum {MIN_SPECIFIC_HEAT}")

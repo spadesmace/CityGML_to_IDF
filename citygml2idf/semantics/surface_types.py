@@ -87,23 +87,15 @@ SURFACE_TYPES = {
     "InteriorWallSurface": SurfaceRule("interior_wall",    "Wall",           "Adiabatic"),  # interior partition wall
 
     # ===========================================================================
-    # DEFERRED — ClosureSurface: a VIRTUAL face that only CLOSES an open volume (the
-    # open side of a loggia, the top of a courtyard). It has NO real material. But E+
-    # BuildingSurface:Detailed REQUIRES a Construction_Name (IDD field A3), so emitting
-    # it would force us to INVENT a dummy construction — which the golden rule forbids.
-    # So it is listed in SKIP_TYPES below — DELIBERATELY dropped, NOT geometry-classified
-    # like a genuinely-unmapped label. Revisit only if a real file needs it to close a
-    # zone (then a default adiabatic construction is the decision to make).
+    # DEFERRED — ClosureSurface: a VIRTUAL face that only CLOSES an
+    # open volume (the open side of a loggia, the top of a courtyard). It has NO real
+    # material, and E+ BuildingSurface:Detailed REQUIRES a Construction_Name (IDD field
+    # A3) we would have to INVENT. Left undecided for now. (Being unmapped, the reader
+    # currently keeps it via geometry classification, like any other unknown label.)
     
-    # "ClosureSurface":      SurfaceRule( ... ),  # needs a decision + a default construction
+    # "ClosureSurface":      SurfaceRule( ... ),  # Not  decide (+ a default construction)
     # ===========================================================================
 }
-
-
-# Types we DELIBERATELY do not emit. A ClosureSurface is a VIRTUAL face (no material,
-# no heat transfer) — a DECIDED skip, not an "unknown" type. The reader drops it rather
-# than geometry-classifying it the way it keeps a genuinely unmapped label.
-SKIP_TYPES = frozenset({"ClosureSurface"})
 
 
 # For the LOD1 fallback: geometry.classify returns a generic ROLE ("wall" /

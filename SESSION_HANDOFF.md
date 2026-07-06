@@ -2,6 +2,141 @@
 
 Date: 2026-06-26
 
+## 2026-07-06 — Excel REMOVED entirely; construction resolution is now a pure RAW CONVERTER (+ deferred JSON archetype stub)
+
+Studied the prof's repo (`piotre13/CityGML2Eplus`) and his latest meeting notes: build a **raw
+converter first** (expects detailed layers OR an averaged value straight from the CityGML,
+**ignores archetype codes**), and add the archetype/DB fallback **at the very end** — as a
+**JSON** table (not Excel), read generically so the real data (TABULA / UBEM-CARDs) drops in
+later with **no code change** ("just change the name"). Key realisation: an archetype is keyed
+by building **function + year + weight**, NOT by `libraryCode` — so our old `(codeSpace,code) →
+Excel` rung mis-modelled it AND duplicated Tier-1's in-file library. His own repo confirms this:
+`data/archetypes.csv` keyed `function,vintage_min,vintage_max,weight → u_wall/u_roof/u_ground/
+u_window/g_window`, explicitly a "TODO placeholder, replace with real data".
+
+**Schema-confirmed the archetype key fields exist** in our XSD: `bldg:function` / `bldg:usage`,
+`bldg:yearOfConstruction`, and `nrg3:bdgConstructionWeight` (codelist `ConstructionWeightValue`
+= veryLight/light/medium/heavy/unknown — exact match to the prof's `weight` column).
+
+**Removed ALL Excel** (no `pandas`/`openpyxl`/`.xlsx` anywhere now):
+- **`model/catalogue.py` DELETED.** Its Excel half (`load_database`, `_load_database_or_empty`,
+  `_excel_match`, `SHEET_NAMES`, `COLUMN_MAP`, `DEFAULT_DB`) was removed; its 3 remaining
+  **pure-CityGML** helpers (`_element_has_layers`, `_index_file_library`,
+  `_library_member_for_code` — the in-file `LayeredConstructionLibrary` resolver, Tier 1) were
+  **folded into `model/constructions.py`** (small section under the imports).
+- **`model/materials.py`** — deleted `_material_from_excel` / `_resolve_excel_field`.
+- **`model/constructions.py`** — deleted `_from_excel` + the whole Tier-3 Excel block; waterfall
+  is now the RAW CONVERTER: **T1 detailed layers → T2 `uValue`→NoMass → T4 default** (no db arg).
+- **`model/openings.py`** — default glazing comes from the code constant `FALLBACK_WINDOW`, not
+  the Excel `windows` sheet (`default_window_construction()` no longer reads a workbook).
+- **`model/units.py`** — dropped the `pandas` import (`_trace_value` now uses `math.isnan`).
+- **`input/construction_db.xlsx` DELETED** (fabricated placeholder data the prof said not to
+  invent).
+
+**Built the JSON archetype STAGE** (swap-ready, INERT — the prof's "parse json, read key/value"):
+- **`model/archetypes.py`** — small stdlib-`json` loader: `load_archetypes(path)` → `{key:
+  {params}}` (drops `_`-doc keys; missing/empty/broken → `{}`), `lookup(table, key)`. Documented,
+  demoable (`python -m citygml2idf.model.archetypes`), but **NOT wired** into the waterfall (raw
+  converter first; slots between T2 and T4 later).
+- **`input/archetypes.json`** — EMPTY placeholder (only a `_README` describing the shape). Tier
+  stays inert; live pipeline is the raw converter.
+
+**Why this is simpler than Excel** (and stays simpler when the real JSON arrives): stdlib `json`
+vs `pandas`+`openpyxl`; a plain `key → values` dict vs 3 sheets + `SHEET_NAMES`/`COLUMN_MAP`
+schema + `(codeSpace,code)` collision rules; one isolated module vs a Tier-3 block woven into the
+resolver; swap = drop a file + change a path vs rebuild a workbook to an exact sheet/column shape.
+
+**Verified (all green):**
+- `py_compile` clean on every changed module; no `pandas`/`xlsx`/`catalogue` refs remain.
+- Case 2.1 → constructions via **Tier 2** (uValue→NoMass R=1/U); full `run.py` end-to-end **exit=0, OK**.
+- `Alderaan_Energy_ADE_All.gml` → **identical** to before: 7 constructions / 19 materials, 6 from
+  `CITYGML_LAYERS` + 1 default. `layered_constr_library_code_2` now resolves from **CityGML
+  layers, not Excel** — proof the Excel tier was never winning on real data (golden rule).
+- Archetype stage loads and reports inert (0 rows).
+
+**Docs updated:** `CLAUDE.md` construction-resolution bullet + deps line; this entry.
+
+**NEXT:** (1) wire a weather `.epw` in `write/writer.py` (`WEATHER_EPW`) → **free-float** run
+(no HVAC, track Zone Mean Air Temperature) — the prof's near-term objective; (2) the
+most-detailed→least-detailed **parameter-ladder** writeup (opaque now, glazing later) to map
+with the prof; (3) THEN the parked window g/u/visible glazing logic (per-window resolution,
+`gValue`→ solar-transmittance fallback→ default, optional visible transmittance — scoped
+2026-07-06 earlier this session). Archetype JSON wiring is LAST.
+
+## 2026-07-05 — Material handling: per-field defaulting + full per-field trace (prof-aligned)
+
+Studied the prof's `constructions.py` / `model.py` / `idf_writer.py` and adopted his cleaner logic while
+KEEPING (and upgrading) our audit trail. The rule: **keep every real value the file provides, default
+ONLY the field that is missing, and trace every parameter.** All in `model/materials.py` (+ a units tweak
++ a writer warmup bump).
+
+- **`nrg:SolidMaterial` → ALWAYS a full E+ `Material`**, PER-FIELD defaulting (`_solid_material` +
+  `_resolve_field`): a SolidMaterial missing one number still becomes a real Material with its other real
+  values. Removed the old "missing mass → NoMass" and "missing conductivity → whole DEFAULT" branches.
+  Realistic per-field defaults (k=1.0, ρ=1000, cp=900, t=0.10), tunable in one place.
+- **`nrg:Gas` → ALWAYS `Material:AirGap`** (`_airgap_material`): real `nrg:rValue` kept; defaults to
+  **0.18** (ISO 6946 still-air gap) when missing/unusable (previously a bad rValue fell to default opaque).
+  `gas_type` recorded for the trace.
+- **`Material:NoMass` ONLY from a uValue-only construction** (R = 1/U, `constructions._from_citygml`) —
+  matches the prof and the spec. `if layers → layered; elif uValue → NoMass; else default`.
+- **specificHeat** (`units.py`): now also ×1000 when the value is `< 10` (a mislabeled kJ/(kg·K)), like the
+  prof, then enforces the E+ floor (100). This rescues Alderaan's `cp = 0.9` → **900** (it was wrongly
+  floored to 100 before).
+- **PER-FIELD TRACE** (the audit ask): every field records `raw (+uom) → value (+unit)`, `source`
+  (`citygml` / `excel` / `default`), and a `reason` when defaulted. BOTH `_material_from_citygml` and
+  `_material_from_excel` now use the same `trace` shape via `_resolve_field` / `_resolve_excel_field`
+  (modular, no repetition). Replaced the old `raw_citygml` / `converted` / `raw_excel` shapes.
+- **`write/writer.py`**: `Maximum_Number_of_Warmup_Days` 25 → 50 — real thermal mass (proper cp)
+  converges slower; without this `id_building_2` hit a warmup non-convergence **Severe** (E+ still
+  "Completed Successfully"; it was numerical, not an invalid IDF).
+- **Verified:** Alderaan SolidMaterials → full `Material` (real k/ρ/t, cp rescued to 900); `Gas` →
+  `AirGap`; the trace shows `source` + conversion + reason per field (e.g. gas rValue `8.314 J/K/mol`
+  → `0.18` `source:default`); `id_building_2` E+ `exit=0/OK`; Case 2.1 unchanged (NoMass, `exit=0`);
+  Excel material trace confirmed per-field.
+- **NOTE:** this intentionally changed Alderaan's material numbers (cp 100→900, gas layers → AirGap) —
+  they are more correct now.
+
+## 2026-07-05 — Pipeline simplified to PRESENCE-BASED (stages removed) + per-case testing
+
+**Decision (with the prof's method in mind):** test the pipeline **one Energy ADE Table-2 case at a
+time** — each a **self-contained single-file GML** in `citygml2idf/input/cases/`, run through `run.py`,
+then inspect the middle layer + IDF + EnergyPlus result. This replaces the old "one big Alderaan file +
+config stage flags" testing.
+
+**Removed the test-stage scaffolding** (with per-case files, the *file* is the scenario, so the flags
+were pure confusion — they produced the misleading `__MZ_Win` folder tag):
+- **Deleted `config.py`** (its only content was the 3 flags `ENABLE_WINDOWS` / `FORCE_SINGLE_ZONE` /
+  `DEFAULT_WWR`).
+- **`run.py`** — removed `STAGES` / `apply_stage` / `flag_tag` / `--stage` / `--default-wwr` and the
+  `STAGE flags:` print. Output folder is now just **`output/runs/<BuildingId>/`** (no stage suffix).
+- **`zones.py`** — always reads the file's `nrg3:ThermalZone`s (dropped the `FORCE_SINGLE_ZONE` branch).
+- **`openings.py`** — only emits a window when the file provides a source (dropped the `ENABLE_WINDOWS`
+  gate and the `DEFAULT_WWR` fabrication branch).
+- The pipeline now does ONE thing: **read a file → one IDF per building → run E+**, purely
+  presence-based (matches the prof + our golden rule). Verified behaviour-preserving: Case 2.1 (no
+  windows in file) → 0 windows; Alderaan `id_building_2` (windows in file) → 4 windows; both `exit=0`.
+- **Run command now:** `python -m citygml2idf.run <path.gml>` (optionally `--building <id>`).
+
+**The 7 Table-2 cases, recommended order (one new capability per step):**
+`2.1` LoD2·1z·no-win → `5.1` LoD2·1z·coincidesHull → `3.1` LoD2·mz → `6.1` LoD3·1z·win·coincidesHull →
+`4.1` LoD3·mz·win → `1.1` LoD1·1z → `1.2` LoD1·mz.
+
+**Sample-authoring rule:** each case = a **self-contained single file** (every reference resolves inside
+it; within-file xlinks are fine, like Alderaan). **No trimming** of the multi-building Alderaan (that
+breaks shared library xlinks). **Cross-file xlink** (a library in a separate file) is a separate later
+item — needs a multi-file id index (`build_id_index`), not one of the 7 cases.
+
+**DONE — Case 2.1:** `input/cases/case_2_1_lod2_1zone.gml` (10×10×3 box, one thermal zone, six
+`thermalBoundary` surfaces, `uValue` constructions via within-file xlink, no windows).
+**XSD-validated: PASSED** against `validation_file/CityGml_ADE_SChema/`. Parses to LoD2 / 6 surfaces /
+320 m²; E+ `exit=0`, 0 Severe (2 benign warnings: design-day-only run + `Material:NoMass` = no thermal
+mass, inherent to the uValue path).
+
+**MISSING / next:** author + validate + run cases `5.1, 3.1, 6.1, 4.1, 1.1, 1.2` (one at a time); add a
+`MAPPING.md` case-coverage table (per case: what we read → what E+ object → status); cross-file xlink
+(`build_id_index`); LoD1 `glazingRatio` window rung. NOTE: `xml_io.DEFAULT_INPUT` still points at the
+deleted `sample_energyADE.gml` — harmless as long as a path is always passed to `run.py`.
+
 ## 2026-07-04 — surface_types.py: schema-grounded coverage expansion
 
 Handled several previously-commented boundary-surface types, EACH decided from the XSD/spec

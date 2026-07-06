@@ -8,7 +8,9 @@ readability and live next door:
     units.py        — value coercion + unit conversion (metres, W/m-K, …)
     citygml_read.py — typed GML child readers (_first_el/_child_text/_measure/_code)
     materials.py    — the 3 EnergyPlus material builders + DEFAULT_MATERIAL
-    catalogue.py    — Excel/DB + in-file library, keyed by (codeSpace, code)
+    archetypes.py   — the EXTERNAL archetype fallback (swappable JSON) — DEFERRED, unwired
+The file's OWN in-file construction library (resolving a libraryCode to its layers) is the
+small section just below the imports — pure CityGML, Tier 1.
 
 HOW A CONSTRUCTION AND ITS MATERIALS FIND EACH OTHER (Energy ADE 3.0):
   The STRUCTURAL link (construction -> layer -> material) is by gml:id — inline
@@ -31,35 +33,55 @@ from collections import Counter
 
 from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, local_name, warn
-from .catalogue import (COLUMN_MAP, DEFAULT_DB, SHEET_NAMES, _element_has_layers,
-                        _excel_match, _index_file_library, _library_member_for_code,
-                        _load_database_or_empty, load_database)
 from .citygml_read import _child_code, _child_measure, _child_text, _first_el
-from .materials import (DEFAULT_MATERIAL, DEFAULT_ROUGHNESS, _material_from_citygml,
-                        _material_from_excel)
+from .materials import DEFAULT_MATERIAL, DEFAULT_ROUGHNESS, _material_from_citygml
 from .units import _length_to_meters, _num, _u_value_to_w_per_m2_k
 
-# Compatibility re-exports: openings.py / zones.py / reader.py import several of the
-# names above through this module (e.g. `from .constructions import _child_text, _num`,
-# `constructions.COLUMN_MAP`). They now LIVE in the split modules; importing them here
-# keeps `constructions.<name>` working so those callers need no change.
+# Compatibility re-exports: zones.py imports a couple of helpers through this module
+# (`from .constructions import _child_text, _num`). They LIVE in the split modules
+# (citygml_read.py / units.py); importing them here keeps `constructions.<name>` working
+# so that caller needs no change.
 
 DEFAULT_NAME = "DEFAULT_CONSTRUCTION"
 ADE_LAYER_ORDER = "inside_to_outside" # in ernergy ade specifcation (3.8 The Layered construction module)
 
 
-# ===== construction builders (the 3 branches) ================================
-def _from_excel(code, db, materials, reverse=False):
-    """Build a construction from the Excel/DB catalogue entry `code`."""
-    layer_names = list(db["constructions"][code])
-    if reverse:
-        layer_names = list(reversed(layer_names))
-    for mname in layer_names:
-        materials.setdefault(mname, _material_from_excel(mname, db))
-    return {"source": "excel", "layers": layer_names, "layer_order": ADE_LAYER_ORDER,
-            "reversed": reverse}
+# ===== the file's OWN in-file construction library (Tier 1 helper) ===========
+# A LayeredConstruction may be NAMED by a `libraryCode` (a gml:CodeType qualified by its
+# `codeSpace`) yet keep its layers in a separate LayeredConstructionLibrary member of the
+# SAME file. Its identity is the PAIR (codeSpace, code) — never the bare code, since two
+# catalogues may reuse a code string. These helpers index those in-file members so a
+# construction named only by libraryCode still resolves to its layers. (Pure CityGML; the
+# EXTERNAL archetype fallback is a swappable JSON in archetypes.py, deferred/unwired.)
+def _element_has_layers(doc, constr_el):
+    """True if a LayeredConstruction carries its OWN inline nrg:layer children."""
+    return constr_el is not None and bool(doc.children(constr_el, "nrg", "layer"))
 
 
+def _index_file_library(doc):
+    """Index every LayeredConstruction in the file by (codeSpace, code).
+
+    Lets a construction named ONLY by libraryCode — whose layers live in a library member
+    we did NOT reach by xlink — still be resolved by its code. Keyed by the (codeSpace,
+    code) PAIR so codes are never confused across catalogues; first definition wins.
+    """
+    library = {}
+    for constr_el in doc.iter_type("nrg", "LayeredConstruction"):
+        code, code_space = _child_code(doc, constr_el, "nrg", "libraryCode")
+        if code:
+            library.setdefault((code_space, code), constr_el)
+    return library
+
+
+def _library_member_for_code(code, code_space, file_library):
+    """The file's own LayeredConstruction with this EXACT (codeSpace, code), or None.
+    Exact-pair match only — we never guess across codeSpaces."""
+    if not code or not file_library:
+        return None
+    return file_library.get((code_space, code))
+
+
+# ===== construction builders ================================================
 def _base_layered_construction(doc, constr_el):
     """The baseLayeredConstruction a ReverseLayeredConstruction points to, or None."""
     props = doc.children(constr_el, "nrg", "baseLayeredConstruction")
@@ -128,7 +150,8 @@ def _from_citygml(doc, constr_el, materials):
                                       context=f"layer '{layer.get(GML_ID)}' thickness")
         mat_prop = doc.children(layer, "nrg", "material")
         mat_el = _first_el(doc, mat_prop[0]) if mat_prop else None
-        m = _material_from_citygml(doc, mat_el, thickness, layer)
+        m = _material_from_citygml(doc, mat_el, thickness, layer,
+                                   thickness_raw=thickness_value, thickness_uom=thickness_uom)
         materials.setdefault(m["name"], m)
         layers.append(m["name"])
     if layers:
@@ -155,6 +178,117 @@ def _from_citygml(doc, constr_el, materials):
 
     warn(f"construction '{constr_el.get(GML_ID)}': no layers or uValue; using default")
     return {"source": "citygml", "layers": [], "layer_order": ADE_LAYER_ORDER}
+
+
+# ===== glazing constructions — RUNG B (SIMPLE) ===============================
+# A window's construction resolves through THIS module too (like the prof's
+# resolve_construction(is_glazing=True)): instead of opaque layers/NoMass it yields the 3
+# fields E+ WindowMaterial:SimpleGlazingSystem needs. "glazing" vs "opaque" is decided by
+# the CALLER (a bldg:Window -> glazing), never by sniffing optical fields.
+# Waterfall (raw converter, per field, default LAST):
+#   u_factor : nrg3:uValue (converted)                       -> DEFAULT_GLAZING_U
+#   shgc     : nrg3:gValue
+#              -> FIRST solar nrg3:transmittance.fraction      (solar tau is a lower bound
+#                 for SHGC; first-wins, warn on duplicates)
+#              -> DEFAULT_GLAZING_SHGC
+#   visible  : FIRST visible nrg3:transmittance.fraction       -> None (E+ N3 optional -> OMIT)
+# Detailed panes (WindowMaterial:Glazing) + per-side emissivity/reflectance are DEFERRED
+# (Rung A). SHGC/VT clamped into the OPEN (0,1) interval (IDD requires >0 and <1).
+DEFAULT_GLAZING_U = 2.8       # W/m2-K
+DEFAULT_GLAZING_SHGC = 0.7
+_GLAZING_EPS = 1e-4
+
+
+def _clamp_open_unit(value):
+    """Force a fraction strictly inside (0,1) — the IDD requires SHGC/VT >0 and <1."""
+    if value is None:
+        return None
+    return min(1.0 - _GLAZING_EPS, max(_GLAZING_EPS, float(value)))
+
+
+def _glazing_transmittances(doc, constr_el):
+    """Read every nrg3:transmittance -> [(wavelengthRange, fraction), …].
+
+    This is the ONE place we parse nrg3:transmittance. Each property holds a
+    <nrg3:Transmittance> with a <nrg3:wavelengthRange> (solar|infrared|visible|total)
+    and a <nrg3:fraction>. Transmittance has NO inside/outside side in the ADE (unlike
+    reflectance/emissivity), so a band is just (wavelengthRange, fraction). Both 'solar'
+    and 'visible' bands are captured here; the caller picks the one it needs.
+    """
+    bands = []
+    for prop in doc.children(constr_el, "nrg", "transmittance"):
+        transmittance_el = _first_el(doc, prop)          # inline <nrg3:Transmittance> (or xlink)
+        if transmittance_el is None:
+            continue
+        wavelength = (_child_text(doc, transmittance_el, "nrg", "wavelengthRange") or "").strip().lower()
+        fraction, _uom = _child_measure(doc, transmittance_el, "nrg", "fraction")
+        if fraction is not None:
+            bands.append((wavelength, fraction))
+    return bands
+
+
+def _first_fraction(bands, wavelength):
+    """(first fraction whose wavelengthRange == wavelength, how many matched)."""
+    hits = [fraction for (band, fraction) in bands if band == wavelength]
+    return (hits[0] if hits else None), len(hits)
+
+
+def _glazing_from_citygml(doc, constr_el, name):
+    """RUNG B: build a SIMPLE glazing (kind='glazing': u_factor, shgc, visible_transmittance)
+    from a LayeredConstruction's uValue / gValue / transmittance. Real CityGML value first,
+    default LAST; visible transmittance is OMITTED (None) when absent. Per-field trace."""
+    trace = {}
+
+    # --- u_factor : nrg3:uValue -> default ---
+    u_raw, u_uom = _child_measure(doc, constr_el, "nrg", "uValue")
+    u_value = _u_value_to_w_per_m2_k(u_raw, u_uom, context=f"glazing '{name}' uValue")
+    if u_value and u_value > 0:
+        u_factor = u_value
+        trace["u_factor"] = {"raw": u_raw, "raw_uom": u_uom or None, "value": u_factor,
+                             "unit": "W/m2-K", "source": "citygml_uValue"}
+    else:
+        u_factor = DEFAULT_GLAZING_U
+        trace["u_factor"] = {"raw": u_raw, "value": u_factor, "unit": "W/m2-K",
+                             "source": "default", "reason": "no usable nrg3:uValue"}
+
+    bands = _glazing_transmittances(doc, constr_el)
+
+    # --- shgc : nrg3:gValue -> FIRST solar transmittance -> default ---
+    g_raw, g_uom = _child_measure(doc, constr_el, "nrg", "gValue")
+    if g_raw is not None:
+        shgc = _clamp_open_unit(g_raw)
+        trace["shgc"] = {"raw": g_raw, "raw_uom": g_uom or None, "value": shgc,
+                         "unit": "fraction", "source": "citygml_gValue"}
+    else:
+        solar, n_solar = _first_fraction(bands, "solar")
+        if solar is not None:
+            if n_solar > 1:
+                warn(f"glazing '{name}': {n_solar} solar transmittances; using the first ({solar})")
+            shgc = _clamp_open_unit(solar)
+            trace["shgc"] = {"raw": solar, "value": shgc, "unit": "fraction",
+                             "source": "citygml_solar_transmittance",
+                             "approximation": "SHGC >= solar transmittance (lower bound)",
+                             "solar_transmittance_count": n_solar}
+        else:
+            shgc = DEFAULT_GLAZING_SHGC
+            trace["shgc"] = {"value": shgc, "unit": "fraction", "source": "default",
+                             "reason": "no nrg3:gValue and no solar nrg3:transmittance"}
+
+    # --- visible transmittance : FIRST visible transmittance -> OMIT (None) ---
+    visible, _n_visible = _first_fraction(bands, "visible")
+    if visible is not None:
+        visible_transmittance = _clamp_open_unit(visible)
+        trace["visible_transmittance"] = {"raw": visible, "value": visible_transmittance,
+                                          "unit": "fraction",
+                                          "source": "citygml_visible_transmittance"}
+    else:
+        visible_transmittance = None
+        trace["visible_transmittance"] = {"value": None, "source": "omitted",
+                                          "reason": "no visible nrg3:transmittance (E+ N3 optional)"}
+
+    return {"name": name, "kind": "glazing", "u_factor": u_factor, "shgc": shgc,
+            "visible_transmittance": visible_transmittance,
+            "source": "citygml_glazing", "trace": trace}
 
 
 # ===== construction owner cascade ============================================
@@ -263,22 +397,22 @@ def _select_trace(trace, owner_id, constr_el, code_info, source):
     return trace
 
 
-# ===== the TIER waterfall (meeting decision) =================================
-# Resolve ONE surface's construction. MOST DETAILED FIRST; the external code/Excel is
-# the LAST fallback, never first.
+# ===== the TIER waterfall (raw converter) ====================================
+# Resolve ONE surface's construction. MOST DETAILED FIRST. This is the RAW CONVERTER:
+# it reads ONLY the CityGML's own data (Tiers 1-2), then a project default (Tier 4).
 #   TIER 1  CityGML DETAILED layers — the construction's own inline nrg:layer, OR an
 #           in-file LayeredConstructionLibrary member (reached by xlink OR by the
 #           (codeSpace, code) pair).
 #   TIER 2  CityGML AVERAGED value  — no layers, only nrg:uValue -> Material:NoMass
 #           (R = 1/U). The typical LoD1 hull case.
-#   TIER 3  EXTERNAL Excel/DB code  — (codeSpace, code) -> construction_db.xlsx.
-#           PLACEHOLDER for the archetype (TABULA / UBEM-CARDs) DB. LAST fallback,
-#           reached ONLY when the CityGML gave nothing. Raw data always beats a code.
-#   TIER 4  DEFAULT construction    — nothing usable anywhere.
-# Tiers 1+2 are read from the CityGML (already in memory), so there is NO speed reason
-# to check the Excel first. (xlink is implicit: property_object already followed it,
-# so `constr_el` IS the referenced object.)
-def _resolve_surface(doc, surf_el, surface_record, db, materials, file_library):
+#   TIER 4  DEFAULT construction    — nothing usable in the CityGML.
+# TIER 3 (the EXTERNAL archetype fallback, keyed by building function/year/weight) is
+# DEFERRED to the end of the project and lives in model/archetypes.py (a swappable JSON,
+# NOT Excel). It is NOT wired here: the professor asked for the raw converter first, and
+# raw CityGML data always beats an archetype code, so it would only ever slot in BETWEEN
+# Tier 2 and Tier 4. (xlink is implicit: property_object already followed it, so
+# `constr_el` IS the referenced object.)
+def _resolve_surface(doc, surf_el, surface_record, materials, file_library):
     """Return (construction_name, resolved_dict, trace) for one surface."""
     # For LoD1 raw solids, surf_el is a gml:Polygon and cannot own Energy ADE
     # layeredConstruction; the construction comes from the ThermalZone / Building
@@ -309,47 +443,45 @@ def _resolve_surface(doc, surf_el, surface_record, db, materials, file_library):
         if resolved.get("layers"):
             resolved = _with_context(resolved, owner_id)
             _select_trace(trace, owner_id, constr_el, code_info, resolved["source"])
+            trace["resolved_construction"] = {
+                "name": name,
+                "source": resolved.get("source"),
+                "layers": list(resolved.get("layers", [])),
+                "layer_order": resolved.get("layer_order"),
+                "source_context_id": resolved.get("source_context_id"),
+            }
             return name, resolved, trace
 
-    # ===== TIER 3 : EXTERNAL Excel/DB by (codeSpace, code) — LAST fallback =====
-    # ARCHETYPE placeholder (TABULA / UBEM-CARDs). This is only the code->Excel LOOKUP;
-    # the real archetype logic is NOT built (deferred: "raw converter first, archetypes
-    # LAST"). It fires ONLY here, after the CityGML tiers gave nothing. Raw data always
-    # beats a code. LATER (the real archetype rung): read the archetype KEY from the
-    # CityGML — the field(s) for building type/age (bldg:yearOfConstruction +
-    # bldg:function/usage, + nrg3:bdgType). FIRST confirm which ADE field carries the
-    # archetype (the open question the prof flagged); that field becomes the lookup key.
-    # Map (type, age-band) -> a construction in the EXTERNAL DB — we do NOT invent the
-    # numbers (TABULA / UBEM-CARDs, prepared by the teammate). construction_db.xlsx is
-    # only a PLACEHOLDER; swap it via SHEET_NAMES/COLUMN_MAP (its own columns, e.g.
-    # use_type/period/u_wall/…) with no pipeline change.
+    # ===== TIER 3 : EXTERNAL ARCHETYPE — DEFERRED (see the waterfall comment) =====
+    # A construction named ONLY by a libraryCode, with no CityGML layers/uValue (and no
+    # in-file library member that has them), has no raw data to convert. In the raw
+    # converter it falls through to the default; the archetype JSON (model/archetypes.py),
+    # keyed by building function/year/weight, will fill this gap LATER.
     for owner_id, constr_el in candidates:
-        code_info = _construction_code_info(doc, constr_el)
-        code = code_info["value"]
-        code_space = code_info["codeSpace"]
-        if _excel_match(code, code_space, db):
-            name = _construction_name(doc, constr_el, code)
-            reverse = constr_el is not None and local_name(constr_el) == "ReverseLayeredConstruction"
-            resolved = _with_context(_from_excel(code, db, materials, reverse=reverse), owner_id)
-            _select_trace(trace, owner_id, constr_el, code_info, resolved["source"])
-            return name, resolved, trace
+        code = _construction_code(doc, constr_el)
         if code:
-            warn(f"construction code '{code}' (codeSpace={code_space!r}) has no CityGML "
-                 f"layers/uValue and is not in the Excel/DB")
+            warn(f"construction code '{code}' has no CityGML layers/uValue; using default "
+                 f"(archetype fallback is deferred)")
 
     # ===== TIER 4 : DEFAULT =====
     materials.setdefault(DEFAULT_MATERIAL["name"], DEFAULT_MATERIAL)
     trace["source"] = "default"
-    trace["why_default"] = ("no CityGML detailed layers (T1), no uValue (T2), "
-                            "and no Excel/DB (codeSpace, code) match (T3)")
+    trace["why_default"] = ("no CityGML detailed layers (T1) and no uValue (T2); "
+                            "archetype fallback (T3) is deferred")
+    trace["resolved_construction"] = {
+        "name": DEFAULT_NAME,
+        "source": "default",
+        "layers": [DEFAULT_MATERIAL["name"]],
+        "layer_order": ADE_LAYER_ORDER,
+        "source_context_id": None,
+    }
     return DEFAULT_NAME, {"source": "default", "layers": [DEFAULT_MATERIAL["name"]],
                           "layer_order": ADE_LAYER_ORDER}, trace
 
 
-def resolve_all(doc, middle, database=None):
+def resolve_all(doc, middle):
     """Resolve every surface in the middle layer; fill middle['constructions'] and
     middle['materials'] (deduped) and tag each surface with its construction name."""
-    database = database if database is not None else _load_database_or_empty()
     # The file's OWN catalogue (LayeredConstructionLibrary members), indexed by
     # (codeSpace, code) so a construction named only by libraryCode still resolves
     # even when it was not reached by xlink. Built once for the whole document.
@@ -358,7 +490,7 @@ def resolve_all(doc, middle, database=None):
     for b in middle["buildings"]:
         for s in b["surfaces"]:
             surf_el = doc.get_by_id(s.get("source_gml_id") or s["source_id"])
-            name, resolved, trace = _resolve_surface(doc, surf_el, s, database, materials, file_library)
+            name, resolved, trace = _resolve_surface(doc, surf_el, s, materials, file_library)
             s["construction"] = name
             s["construction_trace"] = trace
             constructions.setdefault(name, resolved)
@@ -369,7 +501,7 @@ def resolve_all(doc, middle, database=None):
 
 def _demo(path=None):
     from .reader import build_middle_layer
-    doc = xml_io.CityGMLDoc(path or xml_io.DEFAULT_INPUT)
+    doc = xml_io.CityGMLDoc(path)
     middle = build_middle_layer(doc)
     constructions, materials = resolve_all(doc, middle)
     used = Counter(s["construction"] for b in middle["buildings"] for s in b["surfaces"])

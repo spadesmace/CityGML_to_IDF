@@ -7,7 +7,7 @@ gml:CodeType (value + codeSpace). Keeping these four readers together localises
 the small amount of element-touching the construction/material code needs, so the
 rest reads as plain data logic.
 
-Split out of constructions.py; shared by materials.py, catalogue.py, constructions.py.
+Split out of constructions.py; shared by materials.py and constructions.py.
 """
 
 from __future__ import annotations
