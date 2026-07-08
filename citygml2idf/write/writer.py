@@ -26,8 +26,8 @@ from eppy.modeleditor import IDF
 
 from ..citygml import xml_io
 from ..semantics.surface_types import sun_wind_exposure
-from ..model.idf_model import IdfZone
-from ..model.reader import build_idf_middle_layer
+from ..model.model import Zone
+from ..model.reader import build_middle_layer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PKG = os.path.dirname(_HERE)
@@ -191,7 +191,7 @@ def add_building(idf, building):
     zones.py decided (interzone -> explicit reciprocal Surface pair with A6=Surface
     and A7 pointing to the partner surface).
     Falls back to a single implicit zone if 'zones' is absent."""
-    zone_list = building.zones or [IdfZone(f"{building.id}_Zone", None)]
+    zone_list = building.zones or [Zone(f"{building.id}_Zone", None)]
     for zone in zone_list:
         idf.newidfobject("ZONE", Name=zone.name, Multiplier=1, Ceiling_Height="autocalculate",
                          Volume=zone.volume if zone.volume else "autocalculate")
@@ -210,30 +210,32 @@ def add_building(idf, building):
             **_vertex_fields(surface.points))
 
 
-def add_window_construction(idf, window_construction):
-    """Emit the default glazing once: WindowMaterial:SimpleGlazingSystem + a Construction (W3)."""
-    if not window_construction:
-        return
-    glazing_material = window_construction.name + "_GLZ"
-    idf.newidfobject("WINDOWMATERIAL:SIMPLEGLAZINGSYSTEM", Name=glazing_material,
-                     UFactor=window_construction.u_factor,
-                     Solar_Heat_Gain_Coefficient=window_construction.shgc)
-    construction = idf.newidfobject("CONSTRUCTION", Name=window_construction.name)
-    construction.Outside_Layer = glazing_material
+def add_window_constructions(idf, window_constructions):
+    """Emit each glazing once: WindowMaterial:SimpleGlazingSystem + a Construction (W3).
+    Visible Transmittance (IDD N3, optional) is written ONLY when the CityGML gave it."""
+    for wc in window_constructions.values():
+        glazing_material = wc.name + "_GLZ"
+        glazing = idf.newidfobject("WINDOWMATERIAL:SIMPLEGLAZINGSYSTEM", Name=glazing_material,
+                                   UFactor=wc.u_factor, Solar_Heat_Gain_Coefficient=wc.shgc)
+        if wc.visible_transmittance is not None:
+            glazing.Visible_Transmittance = wc.visible_transmittance
+        construction = idf.newidfobject("CONSTRUCTION", Name=wc.name)
+        construction.Outside_Layer = glazing_material
 
 
-def add_windows(idf, building, window_construction):
-    """Emit one FenestrationSurface:Detailed per window on each wall (W1/W2)."""
-    if not window_construction:
+def add_windows(idf, building, window_constructions):
+    """Emit one FenestrationSurface:Detailed per window on each wall, each referencing its
+    OWN glazing construction (W1/W2)."""
+    if not window_constructions:
         return
     for surface in building.surfaces:
         for window in surface.windows:
             # Same all-at-creation vertex passing as walls (see _vertex_fields).
-            # NOTE: EnergyPlus caps WINDOWS at 4 vertices; our openings are quads, so
-            # this is safe. A >4-vertex opening would need simplifying to a quad first.
+            # EnergyPlus caps WINDOWS at 4 vertices; openings.py already reduced any
+            # >4-vertex window to its in-plane bounding quad, so this is safe.
             idf.newidfobject(
                 "FENESTRATIONSURFACE:DETAILED", Name=window.source_id,
-                Surface_Type="Window", Construction_Name=window_construction.name,
+                Surface_Type="Window", Construction_Name=window.construction,
                 Building_Surface_Name=surface.source_id,
                 Number_of_Vertices=len(window.points),
                 **_vertex_fields(window.points))
@@ -248,16 +250,17 @@ def _used_subset(building, constructions, materials):
     return used_c, used_m
 
 
-def build_idf(building, constructions, materials, window_construction=None, out_dir=OUTPUT_IDF_DIR):
+def build_idf(building, constructions, materials, window_constructions=None, out_dir=OUTPUT_IDF_DIR):
     ensure_idd()
     idf = new_empty_idf(weather_available())   # weather present -> RunPeriod + result outputs; else not
     idf.idfobjects["BUILDING"][0].Name = building.id
+    window_constructions = window_constructions or {}
     used_c, used_m = _used_subset(building, constructions, materials)
     add_materials(idf, used_m)
     add_constructions(idf, used_c)
     add_building(idf, building)
-    add_window_construction(idf, window_construction)   # W3 glazing (if any)
-    add_windows(idf, building, window_construction)      # W1/W2 fenestration (if any)
+    add_window_constructions(idf, window_constructions)   # W3 glazings (if any)
+    add_windows(idf, building, window_constructions)       # W1/W2 fenestration (if any)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{building.id}.idf")
     idf.saveas(out_path)
@@ -285,10 +288,12 @@ def run_energyplus(idf_path, weather=WEATHER_EPW, out_dir=None):
 
 def main(path=None):
     doc = xml_io.CityGMLDoc(path)
-    middle = build_idf_middle_layer(doc)
+    middle = build_middle_layer(doc)
     cons, mats = middle.constructions, middle.materials
     for b in middle.buildings:
-        idf_path = build_idf(b, cons, mats)
+        if not b.surfaces:                       # LoD0 / no envelope -> not buildable
+            continue
+        idf_path = build_idf(b, cons, mats, middle.window_constructions)
         rc, err = run_energyplus(idf_path)
         sev = [ln for ln in err.splitlines() if "** Severe" in ln or "** Fatal" in ln]
         warns = sum(1 for ln in err.splitlines() if "** Warning" in ln)

@@ -1,53 +1,12 @@
 """
-geometry/classify.py — give a face a ROLE (wall / roof / ground) from its geometry
-alone. Pure math, no XML, no EnergyPlus objects.
-
-=============================================================================
-WHY THIS FILE EXISTS  (the gist)
-=============================================================================
+ give a face a ROLE (wall / roof / ground) from its geometry
+alone.
 CityGML buildings arrive at different levels of detail:
 
   * LOD2 / LOD3   -> the file LABELS each face (<bldg:WallSurface>, ...), so we
                     just read the label.
   * LOD1 / LOD1.2 -> the building is a bare BOX of polygons (a `lod1Solid`) with
                     NO labels. Nothing says which face is wall / roof / floor.
-
-This module is the brain for that second, label-less case (the common real-world
-one). It reads each face's role from the DIRECTION it points.
-
-=============================================================================
-THE GEOMETRY  (same frame as EnergyPlus "World" coordinates)
-=============================================================================
-Every point is (x, y, z) with     x = EAST,  y = NORTH,  z = UP.
-
-A face's OUTWARD normal n = (nx, ny, nz) is the unit arrow sticking out of it,
-away from the building interior. EnergyPlus describes a surface with two angles:
-
-  TILT    = how tipped-over it is = angle of the normal from straight up (Z+).
-  AZIMUTH = which way it faces on the compass = clockwise from North (Y+).
-
-Roof vs wall vs ground depends on TILT ONLY (a wall facing east and a wall facing
-south are both walls). So the decision below is a pure tilt test; azimuth is
-computed too, but only for cross-checks/debug, never for the role.
-
-Full derivation of tilt (n is a UNIT vector, so |n| = 1; up = z_hat = (0,0,1)):
-
-    cos(tilt) = (n . z_hat) / (|n| |z_hat|) = (nx*0 + ny*0 + nz*1) / 1 = nz
-    =>  tilt = arccos(nz)
-
-    roof   (faces up)    tilt = 0deg    nz = +1
-    wall   (vertical)    tilt = 90deg   nz =  0
-    ground (faces down)  tilt = 180deg  nz = -1
-
-We allow a 60deg margin (real roofs are pitched), so:
-
-    tilt <=  60deg  -> roof      (within 60deg of flat-up;  nz >= cos 60 = +0.5)
-    tilt >= 120deg  -> ground    (within 60deg of flat-down; nz <= -0.5)
-    in between       -> wall      (roughly vertical)
-
-PRECONDITION: the normal MUST already point OUTWARD (done by
-geometry.rings.orient_outward, called in semantics/building_surfaces.py BEFORE this). If the
-file's raw winding were trusted, a floor could read nz=+1 and be called a roof.
 """
 
 from __future__ import annotations
@@ -79,6 +38,7 @@ def tilt_degrees(unit_normal):
     return math.degrees(math.acos(_clamped_nz(unit_normal)))
 
 
+# only used for debugging
 def azimuth_degrees(unit_normal):
     """AZIMUTH the face looks toward, clockwise from North (Y+), in [0, 360).
         azimuth = atan2(East, North) = atan2(nx, ny)

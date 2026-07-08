@@ -80,8 +80,7 @@ class CityGMLDoc:
 
     def __init__(self, path):
         if not path:
-            raise SystemExit("CityGMLDoc: a CityGML/.gml path is required - pass one, e.g.\n"
-                             "  python -m citygml2idf.run citygml2idf/input/cases/case_2_1_lod2_1zone.gml")
+            raise SystemExit("CityGMLDoc: pass a CityGML/.gml path")
         self.path = path
         # WHY: tolerant parser — strip insignificant whitespace, allow big trees,
         # and do NOT fetch external entities (safer + faster).
@@ -90,7 +89,7 @@ class CityGMLDoc:
         self.tree = etree.parse(path, parser)
         self.root = self.tree.getroot()
         self.ns = self._resolve_namespaces()
-        self._by_id = self._index_by_id()
+        self._by_id = self._index_by_id() # read all gml:id
 
     # --- setup -------------------------------------------------------------
     def _resolve_namespaces(self):

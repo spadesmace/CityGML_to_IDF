@@ -35,50 +35,49 @@ When in doubt about `gValue`↔`SHGC`, layer order, boundary conditions, or any 
 
 ## The golden rule (project-wide invariant)
 
-Trust **only** structure + geometry + explicit references (`xlink:href` and `(codeSpace, libraryCode)`). Never trust names, comments, or stated numbers. Specifically:
+Trust **only** structure + geometry + explicit references (`xlink:href` / `gml:id`). Never trust names, comments, or stated numbers. Specifically:
 - **Geometry (vertices) is authoritative**: azimuth/tilt/area/height are computed from vertices, never read from `nrg3:bdgBdrySurfAzimuth`/`bdgArea`/etc. Stated attributes are only a cross-check (warn on mismatch).
 - **A window is never invented**: emit a window only when the file provides a source (`openings.py` is presence-based — it fabricates nothing).
 - On bad/imperfect input: **warn and continue**, never crash silently, never drop received geometry.
 
 ## Architecture — the one-way pipeline
 
-Each folder has a single duty; data flows one direction into a **middle layer** that the writer is the only consumer of. The middle layer has **two views** (same parse, two shapes):
+Each folder has a single duty; data flows one direction into a **middle layer** that the writer is the only consumer of. The middle layer is **ONE typed model** (`model/model.py` dataclasses): `Model → Building → Zone / Surface → Window`, plus `Construction`/`Material`/`WindowConstruction`. Every object also carries a flat `provenance` map (`field → "one readable line: what we did"`) for audit/teaching; the writer reads the fields it needs and ignores `provenance`. *(The old trace/idf dual view + `idf_model.py` + the hand-written conversion layer were collapsed into this single model.)*
 
 ```
 citygml/xml_io.py    ── the ONLY module that touches lxml/XML
       │                  (match by namespace URI not prefix; gml:id→element registry;
       │                   resolve xlinks, accepting "#id" AND bare "id")
       ▼
-geometry/            ── pure math, no XML: rings.py (Newell normal, area, outward winding),
-      │                  crs.py (EPSG parse, reproject-if-geographic, recenter),
+geometry/            ── pure math, no XML: rings.py (Newell normal, area, outward winding,
+      │                  min-corner recenter, quad simplify; coords assumed metric — no CRS reproject),
       │                  classify.py (role from normal)
       ▼
 semantics/           ── surface_types.py (CityGML/ADE type → E+ Surface_Type + boundary),
       │                  building_surfaces.py (one building's envelope, any LoD → uniform surface list)
       ▼
-model/reader.py      ── orchestrates: builds the TRACE middle layer, wiring in
-      │                  constructions.py → openings.py → zones.py, then derives the IDF view
+model/reader.py      ── orchestrates: build_middle_layer(doc) → ONE model.Model,
+      │                  wiring in constructions.py → openings.py → zones.py (each
+      │                  enriches the same Model + fills each object's provenance)
       ▼
-  middle layer ── TWO VIEWS:
-      │   • trace : full parser evidence (construction_trace, raw_citygml, converted values,
-      │             source ids, fallback reasons) — for audit/teaching/debugging
-      │   • idf   : clean writer contract (buildings, zones, surfaces, constructions,
-      │             materials, windows) — derived by to_idf_middle_layer()
+  middle layer ── ONE model.Model (model/model.py dataclasses):
+      │             Model → Building → Zone / Surface → Window (+ Construction/Material/
+      │             WindowConstruction), each object carrying a flat `provenance` map
       ▼
-write/writer.py      ── IDF view → IDF via eppy, block by block; runs EnergyPlus
-idf_building_visualize.py ── optional PNG preview of a building's surfaces
+write/writer.py      ── Model → IDF via eppy, block by block; runs EnergyPlus
+      │                  (reads the data fields; ignores provenance)
 ```
 
 Key design facts worth knowing before editing:
 - **Namespace matching by URI, not prefix.** `xml_io.NS` is the single place URIs live; the file's `nrg3:`/`energy:` prefix is irrelevant. The Energy ADE URI is auto-adopted from the file's nsmap.
 - **Two distinct link mechanisms, kept separate:** (a) CityGML geometry shared by reference — a `gml:Solid`/`MultiSurface` holds `<surfaceMember xlink:href="#id">`, resolved O(1) via the id registry; (b) Energy ADE `nrg3:ThermalZone.thermalBoundary` xlinks zone→surface for ownership. `thermalBoundary` = zone↔surface ownership; `layeredConstruction` = surface→physics. There is **no** `ThermalBoundary` element in ADE 3.0 beta7 (confirmed against the XSD).
 - **Extraction is presence-based, not LoD-driven.** `detect_lod` is recorded for info only; code branches on "are `nrg3:thermalBoundary` / labeled `bldg:boundedBy` surfaces present?", not on the LoD integer. LoD2/3 use labeled surfaces; LoD1 falls back to classifying raw solid faces by outward normal.
-- **Two-view middle layer.** `build_trace_middle_layer` produces the rich audit view; `to_idf_middle_layer` strips it to what the writer needs. `build_both_middle_layers(doc)` returns `(trace, idf)`. **writer.py consumes only the idf view** — keep trace-only fields out of it.
-- **Construction resolution is the RAW CONVERTER — a most-detailed-first waterfall over the CityGML's OWN data** (`model/constructions.py`). A construction and its materials find each other by `gml:id` (inline nesting or `xlink:href`); `libraryCode` (a `gml:CodeType` qualified by its `codeSpace`) is a separate key used to find the layers in the file's own `LayeredConstructionLibrary`. Resolution order, each step bypassing the rest:
-  1. **Tier 1 — DETAILED layers**: the construction's own inline `nrg:layer`, OR (if it carries only a `libraryCode`) the in-file `LayeredConstructionLibrary` member matched by `(codeSpace, code)`;
+- **One typed middle layer.** `build_middle_layer(doc)` returns a single `model.Model`; `constructions.py`/`openings.py`/`zones.py` enrich the same objects in place (setting `Surface.construction`, `Surface.windows`, `Surface.zone`, `Building.zones`, …) and record each parameter's story in that object's flat `provenance` dict. `Model.subset_for_building(id)` slices one building + only the constructions/materials it uses. **The writer reads data fields and ignores `provenance`.** Serialisation: the one `to_jsonable` in `model.py` (`json.dump(..., default=to_jsonable)`).
+- **Construction resolution is the RAW CONVERTER — a most-detailed-first waterfall over the CityGML's OWN data** (`model/constructions.py`). A construction and its materials (and a window's glazing) find each other by `gml:id` **only** (inline nesting or `xlink:href`) — exactly like the reference repo. Each construction is **NAMED by its gml:id**. Resolution order, each step bypassing the rest:
+  1. **Tier 1 — DETAILED layers**: the construction's own inline `nrg:layer`;
   2. **Tier 2 — AVERAGED `uValue` → `Material:NoMass`** (R = 1/U), the typical LoD1/hull case;
   3. **Tier 4 — generic default** + warning.
-  **There is NO Excel.** The old `(codeSpace, code) → construction_db.xlsx` rung was removed (it mis-modelled the archetype and duplicated the in-file library). **Tier 3 — the EXTERNAL archetype fallback — is DEFERRED** and lives in `model/archetypes.py`: a **swappable JSON** table (`input/archetypes.json`) read generically as `key → values`, keyed by building **function + year + weight** (TABULA / UBEM-CARDs), NOT by `libraryCode`. It is **built but not wired** — raw converter first, and the shipped JSON is an empty placeholder so the tier is inert. We never invent the numbers: drop in the real JSON later (change the path, no code change) and confirm the key fields (`bldg:function`, `bldg:yearOfConstruction`, `nrg3:bdgConstructionWeight`) with the professor.
+  **No `libraryCode`/`codeSpace` lookup.** The old `(codeSpace, code)` in-file-library rung was removed: on real data it resolved nothing (every surface xlinks straight to a construction that already carries its layers/uValue), it was inconsistent (only constructions had it, not materials/windows), and the future archetype is keyed by building attributes, not by code. **There is NO Excel** either (an even older `(codeSpace, code) → construction_db.xlsx` rung). **Tier 3 — the EXTERNAL archetype fallback — is DEFERRED** and lives in `model/archetypes.py`: a **swappable JSON** table (`input/archetypes.json`) read generically as `key → values`, keyed by building **function + year + weight** (TABULA / UBEM-CARDs), NOT by `libraryCode`. It is **built but not wired** — raw converter first, and the shipped JSON is an empty placeholder so the tier is inert. We never invent the numbers: drop in the real JSON later (change the path, no code change) and confirm the key fields (`bldg:function`, `bldg:yearOfConstruction`, `nrg3:bdgConstructionWeight`) with the professor.
 - **Interzone surfaces** (a face shared by two modelled zones of one building) become an **explicit reciprocal `Surface` pair** (BC=Surface, reversed twin, Floor↔Ceiling flipped, mirror `<name>_Rev` construction). Boundary is decided by **zone count, not the type name**. A face against the shell / another building / in a single-zone building → `Adiabatic`.
 - **One IDF per building.** Each building is recentered to its own origin (min-corner→0,0, floor z=0); the shift is stored as `origin_offset`.
 
@@ -91,13 +90,13 @@ python -m citygml2idf.run path/to/file.gml                            # every bu
 python -m citygml2idf.run --building id_building_11 path/to/file.gml  # just that one building
 ```
 
-Each building lands in its own folder `citygml2idf/output/runs/<BuildingId>/` holding the IDF, **both** per-building middle layers (`middle_layer_trace_<id>.json` = parser evidence, `middle_layer_idf_<id>.json` = clean writer contract), a `<id>_preview.png`, and **all** EnergyPlus output (`.err`, `.dxf`, `.eio`, …). Different buildings → different folders, so runs never overwrite each other.
+Each building lands in its own folder `citygml2idf/output/runs/<BuildingId>/` holding the IDF, the per-building middle layer (`middle_layer_<id>.json` = the one typed model, data + provenance), and **all** EnergyPlus output (`.err`, `.dxf`, `.eio`, …). Different buildings → different folders, so runs never overwrite each other.
 
 Most modules are independently runnable as a self-test/demo (each prints verification numbers):
 
 ```bash
 python -m citygml2idf.citygml.xml_io [path.gml]    # load, validate (best-effort XSD), prove xlink+posList
-python -m citygml2idf.model.reader [path.gml]      # dump middle_layer_trace.json + middle_layer_idf.json, print envelope areas
+python -m citygml2idf.model.reader [path.gml]      # dump middle_layer.json (one model), print envelope areas
 python -m citygml2idf.model.constructions [path.gml]  # each surface's construction branch (EXCEL / CITYGML_LAYERS / …) + layers
 python -m citygml2idf.write.writer [path.gml]      # full build + E+ run, report Severe/Fatal counts
 ```
@@ -112,7 +111,7 @@ For each case: run `python -m citygml2idf.run input/cases/<case>.gml`, then conf
 
 ## Dependencies & external tooling (not vendored unless noted — must be supplied)
 
-Python deps (no `requirements.txt` present): **lxml, pyproj, numpy, eppy** (IDF), **matplotlib** (the PNG preview in `idf_building_visualize.py`). *(No `pandas`/`openpyxl` — the construction fallback DB is now a stdlib-`json` archetype stub, not an Excel workbook.)*
+Python deps (no `requirements.txt` present): **lxml, numpy, eppy** (IDF). *(No `pyproj` — CRS reprojection was removed and `geometry/crs.py` deleted; CityGML/Energy ADE building geometry is assumed already metric, so we only recentre — `rings.min_corner` finds the origin corner and `reader._parse_epsg` records the EPSG for audit. No `pandas`/`openpyxl` — the construction fallback DB is a stdlib-`json` archetype stub, not an Excel workbook. No `matplotlib` — the PNG previewer was removed.)*
 
 EnergyPlus is invoked as an external process. `write/writer.py` expects a `templates/` folder **inside the package** at [citygml2idf/templates/](citygml2idf/templates/) (`_TEMPLATES = <package>/templates`):
 - `Energy+.idd` (the EnergyPlus 23.1 IDD — the schema eppy/the writer enforce),

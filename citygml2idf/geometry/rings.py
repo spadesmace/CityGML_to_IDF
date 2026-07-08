@@ -1,17 +1,6 @@
-"""
-geometry/rings.py — math on a single polygon ring. Pure numpy, no XML.
-
-A "ring" is the list of (x, y, z) points returned by citygml.xml_io.read_pos_list.
-CityGML rings are CLOSED (last point == first). These helpers give EnergyPlus the
-three things it needs per surface: the polygon's NORMAL, its AREA, and a winding
-oriented so the normal points OUTWARD (away from the zone). We never trust the
-exporter's winding — we compute and flip if needed (the golden rule).
-"""
 
 from __future__ import annotations
-
 import numpy as np
-
 
 def drop_closing_point(points):
     """CityGML repeats the first vertex at the end to close the ring; EnergyPlus
@@ -43,7 +32,7 @@ def newell_normal(points):
         n[2] += (x0 - x1) * (y0 + y1)
     return n
 
-
+# used for checking  geometry in middle layer , window area reporting 
 def polygon_area(points):
     """Polygon area = half the Newell normal's length. True 3D area, so it is
     correct for tilted roofs and triangular gable walls, not just flat ground."""
@@ -61,6 +50,40 @@ def centroid(points):
     """Average of the unique vertices — the face's middle point (np.array of 3)."""
     pts = np.array(drop_closing_point(points), dtype=float)
     return pts.mean(axis=0)
+
+
+def min_corner(ring_list):
+    """(minx, miny, minz) across every point in a LIST OF RINGS — the origin corner a
+    building is recentred against (min corner -> (0,0), floor -> z=0). Coordinates are
+    assumed metric; there is no CRS reprojection."""
+    allpts = np.array([p for ring in ring_list for p in ring], dtype=float)
+    return allpts.min(axis=0)
+
+
+def simplify_to_quad(points):
+    """is mainly for windows because EnergyPlus fenestration surfaces can only have up to 4 vertices."""
+    pts = drop_closing_point(points)
+    if len(pts) <= 4:
+        return [tuple(float(c) for c in p) for p in pts]
+    normal = unit_normal(pts)
+    if float(np.linalg.norm(normal)) == 0.0:
+        return [tuple(float(c) for c in p) for p in pts]     # degenerate -> leave as-is
+    pts_arr = np.array(pts, dtype=float)
+    origin = pts_arr[0]
+    # any vector not parallel to the normal, projected into the plane -> in-plane axis u
+    ref = np.array([1.0, 0.0, 0.0]) if abs(float(np.dot(normal, [1.0, 0.0, 0.0]))) < 0.9 \
+        else np.array([0.0, 1.0, 0.0])
+    u = ref - float(np.dot(ref, normal)) * normal
+    u /= np.linalg.norm(u)
+    v = np.cross(normal, u)                                   # completes the right-handed basis
+    coords = [(float((p - origin) @ u), float((p - origin) @ v)) for p in pts_arr]
+    min_u, max_u = min(a for a, _ in coords), max(a for a, _ in coords)
+    min_v, max_v = min(b for _, b in coords), max(b for _, b in coords)
+    corners = [(min_u, min_v), (max_u, min_v), (max_u, max_v), (min_u, max_v)]
+    quad = [origin + a * u + b * v for (a, b) in corners]
+    if float(np.dot(unit_normal(quad), normal)) < 0.0:       # match original winding
+        quad = list(reversed(quad))
+    return [tuple(float(c) for c in p) for p in quad]
 
 # decide in vs out using a reference
 def orient_outward(points, interior_point):

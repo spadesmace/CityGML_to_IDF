@@ -40,12 +40,13 @@ from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, warn
 from ..geometry import rings
 from .constructions import _child_text as child_text_value, _num as to_number
+from .model import Construction, Surface, Zone
 
-
+# Find ThermalZones
 def thermal_zones(doc, building_element):
-    # WHAT: every nrg3:ThermalZone under a building, by namespace URI (presence-driven;
+    #  every nrg3:ThermalZone under a building, by namespace URI (presence-driven;
     #       [] when the file has none -> caller falls back to one implicit zone).
-    # REF : "ADE object PRIMARY" decision + RULES G13 / ADE spec §4.3.1 (ThermalZone).
+    # REF :  ADE spec §4.3.1 (ThermalZone)
     if building_element is None:
         return []
     return doc.descendants(building_element, "nrg", "ThermalZone")
@@ -105,15 +106,16 @@ def reversed_construction(construction_name, middle):
     # WHAT: name of a layer-REVERSED twin of a construction, so an interzone partner
     #       mirrors the original; single-layer constructions are symmetric -> reuse as-is.
     # REF : E+ wants interzone surfaces to carry mirror constructions (RULES C / G12 upgrade).
-    layers = middle.get("constructions", {}).get(construction_name, {}).get("layers", [])
+    constructions = middle.constructions
+    original = constructions.get(construction_name)
+    layers = original.layers if original is not None else []
     if len(layers) <= 1:
         return construction_name
     reversed_name = construction_name + "_Rev"
-    original = middle.get("constructions", {}).get(construction_name, {})
-    middle["constructions"].setdefault(reversed_name,
-                                       {"source": "reversed",
-                                        "layers": list(reversed(layers)),
-                                        "layer_order": original.get("layer_order", "inside_to_outside")})
+    constructions.setdefault(reversed_name,
+                             Construction(name=reversed_name, source="reversed",
+                                          layers=list(reversed(layers)),
+                                          layer_order=original.layer_order))
     return reversed_name
 
 
@@ -122,59 +124,53 @@ def make_partner(surface, partner_zone_name, partner_name, middle):
     #       winding (normal flips), Floor<->Ceiling flipped, mirror construction, and
     #       Outside_Boundary_Condition=Surface pointing back at the original.
     # REF : RULES G12 upgrade (explicit Surface pair); E+ IDD A6=Surface / A7=Object.
-    flipped_type = {"Floor": "Ceiling", "Ceiling": "Floor"}.get(surface["surface_type"],
-                                                                surface["surface_type"])
-    return {
-        "source_id": partner_name,
-        "type_name": surface.get("type_name", "interzone"),
-        "role": surface.get("role"),
-        "surface_type": flipped_type,
-        "boundary": "Surface",
-        "boundary_object": surface["source_id"],
-        "construction": reversed_construction(surface["construction"], middle),
-        "zone": partner_zone_name,
-        "points": [list(point) for point in reversed(surface["points"])],
-        "area": surface.get("area"),
-        "zone_trace": {"assigned_zone": partner_zone_name,
-                       "boundary": "Surface",
-                       "source": "generated_interzone_partner",
-                       "paired_with": surface["source_id"]},
-    }
+    flipped_type = {"Floor": "Ceiling", "Ceiling": "Floor"}.get(surface.surface_type,
+                                                                surface.surface_type)
+    return Surface(
+        source_id=partner_name,
+        type_name=surface.type_name or "interzone",
+        role=surface.role,
+        surface_type=flipped_type,
+        boundary="Surface",
+        boundary_object=surface.source_id,
+        construction=reversed_construction(surface.construction, middle),
+        zone=partner_zone_name,
+        points=[list(point) for point in reversed(surface.points)],
+        area=surface.area,
+        provenance={"zone": f"assigned to {partner_zone_name}; generated interzone "
+                            f"partner (Surface) paired with {surface.source_id}"},
+    )
 
 
 def _single_zone(building):
     # WHAT: one implicit E+ Zone = the whole building; every surface keeps its own
     #       exterior boundary. Used when there is no ThermalZone in the file.
     # REF : RULES G13 (LoD1 fallback) + config flag (Stages 1-2, the current writer path).
-    zone_name = f"{building['id']}_Zone"
-    building["zones"] = [{"name": zone_name, "volume": None,
-                          "trace": {"name": {"value": zone_name, "source": "implicit"},
-                                    "volume": {"value": None, "unit": "m3",
-                                               "source": "autocalculate",
-                                               "reason": "no nrg3:ThermalZone in CityGML"}}}]
-    for surface in building["surfaces"]:
-        surface["zone"] = zone_name
-        surface["boundary_object"] = ""
-        surface["zone_trace"] = {"assigned_zone": zone_name,
-                                 "source": "implicit_single_zone",
-                                 "owner_count": 1}
+    zone_name = f"{building.id}_Zone"
+    building.zones = [Zone(name=zone_name, volume=None,
+                           provenance={"name": f"{zone_name} (implicit single zone)",
+                                       "volume": "autocalculate (no nrg3:ThermalZone in CityGML)"})]
+    for surface in building.surfaces:
+        surface.zone = zone_name
+        surface.boundary_object = ""
+        surface.provenance["zone"] = f"assigned to {zone_name} (implicit single zone; owner_count=1)"
 
-
+# handles one zone and multiplezone
 def assign_zones(doc, middle):
     # WHAT: tag every surface with its `zone` + boundary and add `building['zones']`.
     #       Pass 1: each zone's owned surface-id set (hull -> whole shell, G13).
     #       Pass 2: by HOW MANY zones own a surface -> exterior (1) or an explicit
     #       interzone Surface pair (2). The writer then emits one Zone per entry.
     # REF : RULES G12 (interzone by ZONE COUNT) + G13 (hull); E+ IDD A6/A7.
-    for building in middle["buildings"]:
-        surfaces = building["surfaces"]
-        building_surface_ids = {surface["source_id"] for surface in surfaces}
+    for building in middle.buildings:
+        surfaces = building.surfaces
+        building_surface_ids = {surface.source_id for surface in surfaces}
         source_to_surface_ids = {}
         for surface in surfaces:
-            source_to_surface_ids.setdefault(surface["source_id"], set()).add(surface["source_id"])
-            source_to_surface_ids.setdefault(surface.get("source_gml_id") or surface["source_id"], set()).add(surface["source_id"])
+            source_to_surface_ids.setdefault(surface.source_id, set()).add(surface.source_id)
+            source_to_surface_ids.setdefault(surface.source_gml_id or surface.source_id, set()).add(surface.source_id)
 
-        zone_elements = thermal_zones(doc, doc.get_by_id(building["id"]))
+        zone_elements = thermal_zones(doc, doc.get_by_id(building.id))
         if not zone_elements:
             _single_zone(building)
             continue
@@ -182,7 +178,7 @@ def assign_zones(doc, middle):
         # pass 1: resolve each ThermalZone's OWNED surface-id set (hull -> whole shell)
         zones = []
         for zone_element in zone_elements:
-            name = zone_element.get(GML_ID) or f"{building['id']}_Zone{len(zones) + 1}"
+            name = zone_element.get(GML_ID) or f"{building.id}_Zone{len(zones) + 1}"
             volume, volume_trace = zone_volume_with_trace(doc, zone_element)
             coincides = coincides_with_hull(doc, zone_element)
             referenced_ids = []
@@ -195,64 +191,57 @@ def assign_zones(doc, middle):
                 for sid in referenced_ids:
                     owned_ids.update(source_to_surface_ids.get(sid, set()))
                 ownership_source = "nrg3:thermalBoundary"
+            volume_note = (f"{volume_trace.get('value')} m3 ({volume_trace.get('source')})"
+                           if volume_trace.get("source") == "citygml"
+                           else f"autocalculate ({volume_trace.get('reason')})")
             zones.append({"name": name, "volume": volume, "ids": owned_ids,
-                          "trace": {"name": {"raw": zone_element.get(GML_ID),
-                                             "value": name,
-                                             "source": "ThermalZone gml:id"},
-                                    "volume": volume_trace,
-                                    "ownership": {"source": ownership_source,
-                                                  "referenced_surface_ids": referenced_ids,
-                                                  "owned_surface_ids": sorted(owned_ids)}}})
-        building["zones"] = [{"name": zone["name"], "volume": zone["volume"],
-                              "trace": zone["trace"]} for zone in zones]
+                          "provenance": {"name": f"{name} (from ThermalZone gml:id)",
+                                         "volume": volume_note,
+                                         "ownership": f"{ownership_source}: owns "
+                                                      f"{len(owned_ids)} surface(s)"}})
+        building.zones = [Zone(name=zone["name"], volume=zone["volume"],
+                               provenance=zone["provenance"]) for zone in zones]
 
         # zone centroid (orientation-independent) for re-orienting interzone faces
-        surfaces_by_id = {surface["source_id"]: surface for surface in surfaces}
+        surfaces_by_id = {surface.source_id: surface for surface in surfaces}
 
         def zone_centroid(zone):
             zone_points = [point for sid in zone["ids"] if sid in surfaces_by_id
-                           for point in surfaces_by_id[sid]["points"]]
+                           for point in surfaces_by_id[sid].points]
             return rings.centroid(zone_points) if zone_points else np.zeros(3)
 
         # pass 2: boundary of each surface by HOW MANY zones own it (G12)
         partner_surfaces = []
         for surface in surfaces:
-            owners = [zone for zone in zones if surface["source_id"] in zone["ids"]]
+            owners = [zone for zone in zones if surface.source_id in zone["ids"]]
             if len(owners) >= 2:                                 # interzone -> explicit Surface pair
                 owner_zone, partner_zone = owners[0], owners[1]
                 # re-orient the face outward from its OWNER zone so Floor/Ceiling is correct
-                oriented, normal = rings.orient_outward(surface["points"], zone_centroid(owner_zone))
-                surface["points"] = [list(point) for point in oriented]
-                if surface["surface_type"] in ("Floor", "Ceiling"):
-                    surface["surface_type"] = "Floor" if normal[2] < 0 else "Ceiling"
-                surface["zone"] = owner_zone["name"]
-                surface["boundary"] = "Surface"
-                partner_name = surface["source_id"] + "_pair"
-                surface["boundary_object"] = partner_name
-                surface["zone_trace"] = {"assigned_zone": owner_zone["name"],
-                                         "owner_count": len(owners),
-                                         "boundary": "Surface",
-                                         "paired_zone": partner_zone["name"],
-                                         "paired_surface": partner_name,
-                                         "source": "shared_by_multiple_zones"}
+                oriented, normal = rings.orient_outward(surface.points, zone_centroid(owner_zone))
+                surface.points = [list(point) for point in oriented]
+                if surface.surface_type in ("Floor", "Ceiling"):
+                    surface.surface_type = "Floor" if normal[2] < 0 else "Ceiling"
+                surface.zone = owner_zone["name"]
+                surface.boundary = "Surface"
+                partner_name = surface.source_id + "_pair"
+                surface.boundary_object = partner_name
+                surface.provenance["zone"] = (f"assigned to {owner_zone['name']}; shared by "
+                                              f"{len(owners)} zones -> interzone Surface, paired "
+                                              f"zone {partner_zone['name']}, partner {partner_name}")
                 partner_surfaces.append(make_partner(surface, partner_zone["name"], partner_name, middle))
                 if len(owners) > 2:
-                    warn(f"surface {surface['source_id']} shared by {len(owners)} zones; using first two")
+                    warn(f"surface {surface.source_id} shared by {len(owners)} zones; using first two")
             elif len(owners) == 1:                               # exterior -> keep type boundary
-                surface["zone"] = owners[0]["name"]
-                surface["boundary_object"] = ""
-                surface["zone_trace"] = {"assigned_zone": owners[0]["name"],
-                                         "owner_count": 1,
-                                         "boundary": surface["boundary"],
-                                         "source": "single ThermalZone owns surface"}
+                surface.zone = owners[0]["name"]
+                surface.boundary_object = ""
+                surface.provenance["zone"] = (f"assigned to {owners[0]['name']} "
+                                              f"(single ThermalZone owns surface; boundary {surface.boundary})")
             else:                                                # orphan -> never drop geometry
-                warn(f"surface {surface['source_id']} in no ThermalZone; placed in {zones[0]['name']}")
-                surface["zone"] = zones[0]["name"]
-                surface["boundary_object"] = ""
-                surface["zone_trace"] = {"assigned_zone": zones[0]["name"],
-                                         "owner_count": 0,
-                                         "boundary": surface["boundary"],
-                                         "source": "orphan_fallback"}
+                warn(f"surface {surface.source_id} in no ThermalZone; placed in {zones[0]['name']}")
+                surface.zone = zones[0]["name"]
+                surface.boundary_object = ""
+                surface.provenance["zone"] = (f"assigned to {zones[0]['name']} "
+                                              f"(orphan fallback; boundary {surface.boundary})")
         surfaces.extend(partner_surfaces)                        # add the reciprocal twins
     return middle
 
@@ -261,13 +250,13 @@ def _demo(path=None):
     from .reader import build_middle_layer
     doc = xml_io.CityGMLDoc(path)
     middle = build_middle_layer(doc)            # build_middle_layer already calls assign_zones
-    for building in middle["buildings"]:
-        zone_names = [zone["name"] for zone in building.get("zones", [])]
-        print(f"  {building['id']}: {len(zone_names)} zone(s) {zone_names}")
-        for surface in building["surfaces"]:
-            if surface.get("boundary") == "Surface":
-                print(f"      interzone {surface['source_id']:<24} {surface['surface_type']:<8}"
-                      f" zone={surface['zone']:<22} <-> {surface['boundary_object']}")
+    for building in middle.buildings:
+        zone_names = [zone.name for zone in building.zones]
+        print(f"  {building.id}: {len(zone_names)} zone(s) {zone_names}")
+        for surface in building.surfaces:
+            if surface.boundary == "Surface":
+                print(f"      interzone {surface.source_id:<24} {surface.surface_type:<8}"
+                      f" zone={surface.zone:<22} <-> {surface.boundary_object}")
 
 
 if __name__ == "__main__":

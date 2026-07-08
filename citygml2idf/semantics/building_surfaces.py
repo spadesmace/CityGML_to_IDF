@@ -17,9 +17,9 @@ Either way we return ONE uniform list of surface dicts:
 so zones / openings / constructions / writer never care what LoD the file was.
 
 Kept deliberately small and reference-tolerant (surfaces may be inline OR an
-`xlink`), so it works for any valid CityGML, not just this sample. Reprojection
-to metres + recentring happen later in model/reader.py, over the whole site;
-here the points are raw but already wound OUTWARD.
+`xlink`), so it works for any valid CityGML, not just this sample. Recentring to a
+local origin happens later in model/reader.py, over the whole site; here the points
+are raw (assumed metric — no CRS reprojection) but already wound OUTWARD.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from enum import Enum
 from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, local_name
 from ..geometry import rings, classify
+from ..model.model import Surface
 from . import surface_types
 
 # LoD metadata is informational only. The parser still chooses geometry by schema
@@ -128,13 +129,12 @@ def _unique_ids(*ids):
     return out
 
 
-# Big Ladder / EnergyPlus docs list BuildingSurface:Detailed as a detailed surface object with Number of Vertices and vertex coordinates
-#  not as a container for several disconnected polygons
+
 def _surface_records(type_name, sid, rings_list, contexts):
     """One parsed record per surface
     """
     for ring in rings_list[:1]:                  # [:1] -> the single polygon; never split
-        yield (type_name, sid, ring, _unique_ids(sid, *contexts), sid, 1, 1)
+        yield (type_name, sid, ring, _unique_ids(sid, *contexts), sid)
 
 
 def _thermal_zone_ids(doc, holder):
@@ -276,7 +276,7 @@ def _solid_faces(doc, building, lod):
                 poly = _first_element(sm, doc)
                 if poly is not None:
                     sid = poly.get(GML_ID)
-                    out.append((None, sid, xml_io.read_pos_list(doc, poly), contexts, sid, 1, 1))
+                    out.append((None, sid, xml_io.read_pos_list(doc, poly), contexts, sid))
     return out
 
 
@@ -319,11 +319,11 @@ def process_surfaces(raw):
     PURE geometry/semantics — no XML, no doc."""
     # Interior reference point = centroid of ALL this building's vertices, used to
     # orient every face's normal OUTWARD (we never trust the file's winding).
-    all_pts = [p for (_, _, ring, _, _, _, _) in raw for p in rings.drop_closing_point(ring)]
+    all_pts = [p for (_, _, ring, _, _) in raw for p in rings.drop_closing_point(ring)]
     interior = rings.centroid(all_pts) if all_pts else None   # AVERAGE of all the building's corners
 
     surfaces = []
-    for type_name, sid, ring, construction_context_ids, source_gml_id, part_index, part_count in raw:
+    for type_name, sid, ring, construction_context_ids, source_gml_id in raw:
         if interior is None or len(rings.drop_closing_point(ring)) < 3:  # not a real polygon -> ignore
             xml_io.warn(f"surface {sid}: fewer than 3 points; skipped")
             continue
@@ -343,43 +343,43 @@ def process_surfaces(raw):
             xml_io.warn(f"surface {sid}: could not resolve type '{type_name}'; skipped")
             continue
 
+        # FloorOrCeiling is resolved to a concrete E+ keyword by the normal's z
         surface_type = surface_types.resolve_floor_ceiling(rule.surface_type, normal[2])
-        surfaces.append({
-            "source_id": sid,
-            "source_gml_id": source_gml_id,
-            "type_name": type_name or "classified",
-            "role": rule.role,
-            # FloorOrCeiling is resolved to a concrete E+ keyword by the normal's z
-            "surface_type": surface_type,
-            "boundary": rule.boundary,
-            "points": [list(p) for p in oriented],
-            "construction_context_ids": construction_context_ids,
-            "semantic_trace": {
-                "source_type_name": type_name,
-                "rule_source": "CityGML/ADE surface type" if type_name else "geometry normal classification",
-                "role": rule.role,
-                "surface_type": surface_type,
+        rule_source = ("CityGML/ADE surface type" if type_name
+                       else "geometry normal classification")
+        surfaces.append(Surface(
+            source_id=sid,
+            source_gml_id=source_gml_id,
+            type_name=type_name or "classified",
+            role=rule.role,
+            surface_type=surface_type,
+            boundary=rule.boundary,
+            points=[list(p) for p in oriented],
+            construction_context_ids=construction_context_ids,
+            provenance={
+                "role": f"{rule.role} ({rule_source}"
+                        + (f" '{type_name}'" if type_name else "") + ")",
+                "surface_type": f"{surface_type} (outward normal z={normal[2]:.3f})",
                 "boundary": rule.boundary,
-                "outward_normal": [float(v) for v in normal],
             },
-        })
+        ))
     return surfaces
 
 
 def surfaces_of_building(doc, building):
     """Return (lod, path, surfaces) for one building as the uniform surface list.
 
-    `path` (SurfacePath) records WHICH source was used — kept in the trace for audit.
+    `path` (SurfacePath) records WHICH source was used — kept on the Building for audit.
     A NONE path (no usable envelope, e.g. LoD0) yields an empty surface list: the
-    building stays in the trace but reader.to_idf_middle_layer drops it from the IDF
-    view, so the writer never emits a zone-with-no-surfaces IDF.
+    building stays in the Model but the writer skips it, so it never emits a
+    zone-with-no-surfaces IDF.
     """
     lod = detect_lod(doc, building)
     path, raw = select_surface_path(doc, building, lod)
     if path is SurfacePath.NONE:
         xml_io.warn(f"building {building.get(GML_ID)}: no usable envelope surfaces "
                     f"(LoD0 footprint only / no thermalBoundary / boundedBy / solid); "
-                    f"kept in trace, no IDF written")
+                    f"kept in model, no IDF written")
     return lod, path, process_surfaces(raw)
 
 
@@ -389,9 +389,9 @@ def _demo(path=None):
         lod, path_used, surfs = surfaces_of_building(doc, b)
         print(f"{b.get(GML_ID)}  LOD{lod}  [{path_used.value}]  {len(surfs)} surfaces")
         for s in surfs:
-            area = rings.polygon_area(s["points"])
-            print(f"   {s['source_id']:<18} {s['type_name']:<24} {s['role']:<18}"
-                  f" {s['surface_type']:<8} {s['boundary']:<10} {len(s['points'])}pts  area={area:6.1f}")
+            area = rings.polygon_area(s.points)
+            print(f"   {s.source_id:<18} {s.type_name:<24} {s.role:<18}"
+                  f" {s.surface_type:<8} {s.boundary:<10} {len(s.points)}pts  area={area:6.1f}")
 
 
 if __name__ == "__main__":

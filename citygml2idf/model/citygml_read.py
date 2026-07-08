@@ -2,10 +2,9 @@
 model/citygml_read.py — typed GML child readers (thin wrappers over CityGMLDoc).
 
 Pull ONE typed value out of a CityGML element: the object inside a property
-(inline child or xlink), plain text, a gml:MeasureType (value + uom), or a
-gml:CodeType (value + codeSpace). Keeping these four readers together localises
-the small amount of element-touching the construction/material code needs, so the
-rest reads as plain data logic.
+(inline child or xlink), plain text, or a gml:MeasureType (value + uom). Keeping
+these readers together localises the small amount of element-touching the
+construction/material code needs, so the rest reads as plain data logic.
 
 Split out of constructions.py; shared by materials.py and constructions.py.
 """
@@ -38,15 +37,3 @@ def _child_measure(doc, parent, prefix, local):
     el = els[0]
     text = el.text.strip() if el.text and el.text.strip() else None
     return _num(text), (el.get("uom") or "").strip()
-
-
-def _child_code(doc, parent, prefix, local):
-    """Return (code text, codeSpace) for a gml:CodeType-like child."""
-    if parent is None:
-        return None, None
-    els = doc.children(parent, prefix, local)
-    if not els:
-        return None, None
-    el = els[0]
-    text = el.text.strip() if el.text and el.text.strip() else None
-    return text, el.get("codeSpace")

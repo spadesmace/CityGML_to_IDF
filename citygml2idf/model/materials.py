@@ -9,8 +9,8 @@ A CityGML layer material maps by its SOURCE (never guessed):
 
 PER-FIELD DEFAULTING (the audit rule): KEEP every value the file provides and default
 ONLY the field that is missing — a SolidMaterial missing one number still becomes a real
-Material with its other real values, never a whole default. Every field carries a `trace`
-line (raw value + uom -> converted value + unit, or `source: default` + why).
+Material with its other real values, never a whole default. Every field records a flat
+`provenance` line (what we did: raw -> converted, or defaulted + why).
 
 Split out of constructions.py; the construction builders that USE these live there.
 """
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from ..citygml.xml_io import GML_ID, local_name, warn
 from .citygml_read import _child_measure, _child_text
+from .model import Material
 from .units import (_conductivity_to_w_per_m_k, _density_to_kg_per_m3,
                     _specific_heat_to_j_per_kg_k)
 
@@ -34,63 +35,58 @@ DEFAULT_SPECIFIC_HEAT = 900.0      # J/kg-K
 DEFAULT_THICKNESS = 0.10           # m
 DEFAULT_AIRGAP_RESISTANCE = 0.18   # m2-K/W  (ISO 6946 still-air gap)
 
-DEFAULT_MATERIAL = {"name": "DEFAULT_OPAQUE", "eplus": "Material",
-                    "thickness": DEFAULT_THICKNESS, "conductivity": DEFAULT_CONDUCTIVITY,
-                    "density": DEFAULT_DENSITY, "specific_heat": DEFAULT_SPECIFIC_HEAT,
-                    "roughness": DEFAULT_ROUGHNESS}
+DEFAULT_MATERIAL = Material(name="DEFAULT_OPAQUE", eplus="Material",
+                            thickness=DEFAULT_THICKNESS, conductivity=DEFAULT_CONDUCTIVITY,
+                            density=DEFAULT_DENSITY, specific_heat=DEFAULT_SPECIFIC_HEAT,
+                            roughness=DEFAULT_ROUGHNESS,
+                            provenance={"all": "project default (no CityGML material)"})
 
 
-# ===== per-field resolution + trace ==========================================
+# ===== per-field resolution + provenance =====================================
 # Each field is resolved ONCE here: read the CityGML value, convert to E+ units, and
-# KEEP it — falling back to a default ONLY when the field is absent. The returned trace
-# line is the audit record for that one parameter (raw -> converted, or defaulted + why).
+# KEEP it — falling back to a default ONLY when the field is absent. The returned
+# provenance line is the audit record for that one parameter (raw -> converted, or why
+# defaulted), as ONE readable string.
+def _measure_note(raw, uom, value, unit):
+    """"citygml <raw> <uom> -> <value> <unit>" (uom omitted when absent)."""
+    return f"citygml {raw}{(' ' + uom) if uom else ''} -> {value} {unit}"
+
+
 def _resolve_field(doc, mat_el, tag, convert, default, unit, mat_name):
-    """(value, trace) for one nrg:<tag> measure. Real value kept; default only if absent."""
+    """(value, provenance) for one nrg:<tag> measure. Real value kept; default if absent."""
     raw, uom = _child_measure(doc, mat_el, "nrg", tag)
     if raw is not None:
         value = convert(raw, uom, context=f"material '{mat_name}' {tag}")
-        return value, {"raw": raw, "raw_uom": uom or None,
-                       "value": value, "unit": unit, "source": "citygml"}
-    return default, {"raw": None, "value": default, "unit": unit,
-                     "source": "default", "reason": f"{tag} not provided by CityGML"}
+        return value, _measure_note(raw, uom, value, unit)
+    return default, f"default {default} {unit} ({tag} not in CityGML)"
 
 
 def _resolve_specific_heat(doc, mat_el, mat_name):
-    """(value, trace) for specificHeatCapacity -> J/(kg-K). units.py auto-converts kJ and
-    enforces the E+ floor; a MISSING value defaults to a realistic DEFAULT_SPECIFIC_HEAT."""
+    """(value, provenance) for specificHeatCapacity -> J/(kg-K). units.py auto-converts kJ
+    and enforces the E+ floor; a MISSING value defaults to DEFAULT_SPECIFIC_HEAT."""
     raw, uom = _child_measure(doc, mat_el, "nrg", "specificHeatCapacity")
     if raw is None:
-        return DEFAULT_SPECIFIC_HEAT, {"raw": None, "value": DEFAULT_SPECIFIC_HEAT,
-                                       "unit": "J/kg-K", "source": "default",
-                                       "reason": "specificHeatCapacity not provided by CityGML"}
+        return DEFAULT_SPECIFIC_HEAT, (f"default {DEFAULT_SPECIFIC_HEAT} J/kg-K "
+                                       f"(specificHeatCapacity not in CityGML)")
     value = _specific_heat_to_j_per_kg_k(raw, uom, context=f"material '{mat_name}' specificHeatCapacity")
-    return value, {"raw": raw, "raw_uom": uom or None,
-                   "value": value, "unit": "J/kg-K", "source": "citygml"}
+    return value, _measure_note(raw, uom, value, "J/kg-K")
 
 
 def _resolve_thickness(thickness, raw=None, raw_uom=None):
-    """(value, trace) for layer thickness.
-
-    `thickness` is the EnergyPlus-ready value in metres. `raw`/`raw_uom` preserve
-    the original CityGML measure so the trace can explain unit conversion.
-    """
+    """(value, provenance) for layer thickness. `thickness` is the E+-ready value in
+    metres; raw/raw_uom preserve the original CityGML measure for the note."""
     if thickness:
-        trace = {"raw": raw, "raw_uom": raw_uom or None,
-                 "value": thickness, "unit": "m",
-                 "source": "citygml_layer", "conversion": "length_to_meters"}
-        return thickness, trace
-    return DEFAULT_THICKNESS, {"raw": raw, "raw_uom": raw_uom or None,
-                               "value": DEFAULT_THICKNESS, "unit": "m",
-                               "source": "default",
-                               "reason": "layer thickness not provided"}
+        return thickness, _measure_note(raw, raw_uom, thickness, "m")
+    return DEFAULT_THICKNESS, f"default {DEFAULT_THICKNESS} m (thickness not provided)"
 
 
 def _default_material_copy(name, reason):
     """A named copy of DEFAULT_MATERIAL, tagged with why the fallback fired."""
-    material = dict(DEFAULT_MATERIAL, name=name)
-    material["source"] = "default"
-    material["fallback_reason"] = reason
-    return material
+    return Material(name=name, eplus="Material",
+                    thickness=DEFAULT_THICKNESS, conductivity=DEFAULT_CONDUCTIVITY,
+                    density=DEFAULT_DENSITY, specific_heat=DEFAULT_SPECIFIC_HEAT,
+                    roughness=DEFAULT_ROUGHNESS,
+                    provenance={"all": f"project default ({reason})"})
 
 
 # ===== material builders (one of the 3 E+ objects) ===========================
@@ -110,12 +106,12 @@ def _solid_material(doc, mat_el, name, thickness, thickness_raw=None, thickness_
                                    _density_to_kg_per_m3, DEFAULT_DENSITY, "kg/m3", name)
     cp, cp_tr = _resolve_specific_heat(doc, mat_el, name)
     thick, thick_tr = _resolve_thickness(thickness, thickness_raw, thickness_uom)
-    return {"name": name, "eplus": "Material",
-            "thickness": thick, "conductivity": cond, "density": dens, "specific_heat": cp,
-            "roughness": DEFAULT_ROUGHNESS,
-            "source": "citygml_solid",
-            "trace": {"thermalConductivity": cond_tr, "density": dens_tr,
-                      "specificHeatCapacity": cp_tr, "thickness": thick_tr}}
+    return Material(
+        name=name, eplus="Material",
+        thickness=thick, conductivity=cond, density=dens, specific_heat=cp,
+        roughness=DEFAULT_ROUGHNESS,
+        provenance={"conductivity": cond_tr, "density": dens_tr,
+                    "specific_heat": cp_tr, "thickness": thick_tr})
 
 
 def _airgap_material(doc, mat_el, name, thickness, thickness_raw=None, thickness_uom=None):
@@ -127,17 +123,14 @@ def _airgap_material(doc, mat_el, name, thickness, thickness_raw=None, thickness
     unit = (uom or "").lower().replace(" ", "")
     if raw is not None and ("m2" in unit or "m^2" in unit) and "k" in unit and "w" in unit:
         r_value = raw
-        r_tr = {"raw": raw, "raw_uom": uom, "value": raw, "unit": "m2-K/W", "source": "citygml"}
+        r_note = f"citygml rValue {raw} {uom} -> {raw} m2-K/W"
     else:
         reason = f"rValue unit '{uom}' not m2-K/W" if raw is not None else "rValue not provided by CityGML"
         warn(f"gas material '{name}': {reason}; using ISO 6946 default {DEFAULT_AIRGAP_RESISTANCE}")
         r_value = DEFAULT_AIRGAP_RESISTANCE
-        r_tr = {"raw": raw, "raw_uom": uom or None, "value": DEFAULT_AIRGAP_RESISTANCE,
-                "unit": "m2-K/W", "source": "default", "reason": reason}
-    return {"name": name, "eplus": "Material:AirGap", "thermal_resistance": r_value,
-            "source": "citygml_gas", "gas_type": gas_type,
-            "trace": {"rValue": r_tr, "gas_type": gas_type,
-                      "thickness": _resolve_thickness(thickness, thickness_raw, thickness_uom)[1]}}
+        r_note = f"default {DEFAULT_AIRGAP_RESISTANCE} m2-K/W ({reason})"
+    return Material(name=name, eplus="Material:AirGap", thermal_resistance=r_value,
+                    provenance={"thermal_resistance": r_note, "gas_type": gas_type})
 
 
 def _material_from_citygml(doc, mat_el, thickness, layer_el=None, thickness_raw=None, thickness_uom=None):

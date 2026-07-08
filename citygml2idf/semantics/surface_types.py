@@ -1,22 +1,3 @@
-"""
-semantics/surface_types.py — what each CityGML / Energy ADE surface TYPE means to
-EnergyPlus. No XML, no geometry math: just the lookup table + tiny resolvers.
-
-EnergyPlus has only FOUR Surface_Type keywords — Wall, Roof, Floor, Ceiling —
-verified against the EnergyPlus 23.1 schema (templates/Energy+.idd,
-BuildingSurface:Detailed field A2). The many CityGML/ADE thematic classes collapse
-onto those four and differ mainly in their Outside_Boundary_Condition (field A6).
-The full allowed keyword lists from that IDD are kept below as a reference
-(EPLUS_SURFACE_TYPES and EPLUS_BOUNDARY_CONDITIONS) so we always map to a value
-EnergyPlus actually accepts.
-
-The COMPLETE list of boundary-surface classes (straight from the XSDs) is below.
-Types we have DECIDED are active in SURFACE_TYPES. Types we have NOT decided yet
-are listed but COMMENTED OUT (#), named, so we MUST come back here and choose
-their role / Surface_Type / boundary — we never guess one inside the logic.
-
-Match by LOCAL name (the namespace, bldg vs nrg3, is resolved by the reader).
-"""
 
 from __future__ import annotations
 

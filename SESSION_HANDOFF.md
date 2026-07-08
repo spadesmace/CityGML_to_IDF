@@ -2,6 +2,335 @@
 
 Date: 2026-06-26
 
+## 2026-07-07 (cont. 4) — libraryCode/codeSpace REMOVED: construction resolution is now pure xlink/gml:id (like the prof) (READ THIS FIRST if resuming)
+
+Studied the prof's `constructions.py`: he resolves construction AND material by **xlink/gml:id
+only** (`id_index.get(constr_id)` / `id_index.get(mat_id)`), NO libraryCode/codeSpace anywhere;
+his archetype is keyed by building **function/vintage/weight**, not by code. We had an EXTRA
+`(codeSpace, code)` in-file-library lookup on the construction path only (not materials/windows —
+inconsistent). Verified it was **dormant** on Alderaan (every surface xlinks straight to a
+construction that already carries its layers/uValue, so the code-library drill-in never won; the
+only thing `code` did was NAME constructions). Decision (with user): remove ALL code/codeSpace
+logic to match the prof and make construction/material/window uniformly xlink/gml:id.
+
+### DONE (all in `model/constructions.py` + `model/citygml_read.py`)
+- **Removed** `_index_file_library`, `_library_member_for_code`, `_element_has_layers`,
+  `_construction_code_info`, `_construction_code`, and the `(codeSpace, code)` drill-in branch in
+  `_resolve_surface`; dropped the `file_library` arg through `resolve_all`/`_resolve_surface`;
+  dropped the Tier-3 code-warn loop and the `libraryCode`/`libraryCodeSpace` trace fields.
+- **`_construction_name(doc, constr_el)`** now returns the **gml:id** (was code-first). So
+  constructions/glazings are named by gml:id (`id_layered_construction_ground_1`,
+  `id_layered_construction_glazing_5`) instead of `layered_constr_library_code_X`.
+- **`window_glazing`** updated to the new `_construction_name` signature (no code).
+- **Removed `_child_code`** (the gml:CodeType/codeSpace reader) from `citygml_read.py` — now unused.
+- Waterfall is now: **T1 inline layers -> T2 uValue->NoMass -> T4 default** (T3 archetype still
+  deferred). Materials + windows already resolved by gml:id only, so the whole path is uniform now.
+- Docs: `CLAUDE.md` construction-resolution bullet + golden-rule line; this entry.
+
+### VERIFIED (`PYTHONHASHSEED=0`, one sample as asked)
+- **`id_building_2`** (richest: 3 layered constructions + glazing + materials + 4 windows) —
+  exit=0, 0 severe. Constructions now named by gml:id, **layers intact** (5 each,
+  `source=citygml_layers`); glazing `id_layered_construction_glazing_5` U=1.9 SHGC=0.7; surface
+  provenance clean (`citygml_layers from construction 'id_layered_construction_ground_1'`).
+- **Case 2.1** — exit=0, 0 severe (still builds; construction resolution unaffected).
+- `py_compile` clean; no code refs to any removed symbol (only docstrings note "no libraryCode").
+
+### NOTE
+- **Byte-identity intentionally broken** for window-bearing buildings: construction NAMES changed
+  from codes to gml:ids (functionally identical IDF, different text). Case 2.1 no longer needs to
+  be byte-compared for this change; correctness = exit=0 + right layers + gml:id names.
+- If the real archetype JSON ever needs a code key, it is keyed by building function/year/weight
+  (bldg:function / bldg:yearOfConstruction / nrg3:bdgConstructionWeight), NOT libraryCode — so this
+  removal does not block it.
+
+## 2026-07-07 (cont. 3) — CRS REPROJECTION REMOVED (assume metric, like the prof)
+
+Studied the prof's repo (`piotre13/CityGML2Eplus`) CRS handling: **he does NONE** — no
+`pyproj`/`srsName`/EPSG/reprojection; he assumes metric input and only computes a min-corner
+origin + translates. Verified our reprojection was **already inert** on real data: Alderaan is
+EPSG:28992 (projected/metres) so `build_transformer` returned None → `reproject` was a no-op.
+Also, only surfaces went through `reproject`, not explicit LoD3 windows — a latent asymmetry
+(harmless while reprojection is inert, broken only for geographic input).
+
+**Decision (with user):** drop CRS reprojection, assume metric like the prof. This is inert on
+all realistic CityGML (building geometry is authored in a projected CRS) AND removes the
+surface/window asymmetry for free (both are now raw coords + the same recentre offset).
+
+### DONE
+- **`geometry/crs.py` DELETED entirely** (and its `pyproj` import gone). Removed
+  `is_geographic`/`pick_utm_epsg`/`build_transformer`/`reproject`/`recenter`. Its two surviving
+  functions moved to where they're used: **`min_corner` -> `geometry/rings.py`** (geometry math,
+  the recenter origin) and **`parse_epsg` -> `model/reader.py` as `_parse_epsg`** (audit-only EPSG
+  record; the sole caller). `reader` now imports only `rings`, no `crs`.
+- **`model/reader.py`** step 2: removed the `sample_lonlat` scan + `build_transformer` +
+  `reproject` loop → plain float-cast of `s.points`. `model.crs` now records
+  `{srsName, epsg, units:"assumed_metric"}` (was `reprojected`). Recenter (step 3) unchanged.
+- **`model/openings.py`** — NO code change (explicit windows already used raw coords + offset);
+  only the docstring note updated (windows/surfaces now provably consistent).
+- Docstrings: `building_surfaces.py`, `geometry/__init__.py`. **`CLAUDE.md`** deps line (dropped
+  `pyproj` + the already-dead `matplotlib`) + architecture `crs.py` description.
+
+### VERIFIED (`PYTHONHASHSEED=0`)
+- **Case 2.1** — IDF **byte-identical** to baseline (reprojection was inert, so removal is a no-op).
+- **`id_building_2`** — exit=0, 0 severe; `crs` record = `units:assumed_metric`; window vertex
+  metric/recentred (e.g. `[10.0, 5.0, 12.879]`), consistent with surfaces.
+- `py_compile` clean; no `pyproj`/`reproject`/`build_transformer` code refs remain (docstrings only).
+
+### NOTE
+- `parse_epsg` grabs the LAST number in a compound srsName (Alderaan → 5109, the vertical CRS,
+  not 28992). Harmless now (epsg is audit-only, never used to transform). Fix only if we ever
+  reintroduce CRS logic.
+- Trade-off accepted: a geographic-CRS input would now be used as-is (wrong) — but Energy ADE
+  building models don't use geographic CRS. To re-add support later, reprojection must be applied
+  to BOTH surfaces AND explicit windows (the old asymmetry).
+
+## 2026-07-07 (cont. 2) — WINDOW GLAZING WIRED (per-window) + >4-vertex window simplify_to_quad
+
+Finished the two parked window threads. Grounded in the schema chain
+(`surface → bldg:opening → bldg:Window → lod3MultiSurface geometry + nrg3:layeredConstruction glazing`)
+and the prof's repo (`piotre13/CityGML2Eplus`): `parse_gml.py` reads each Window's own
+`nrg3:layeredConstruction` with `resolve_construction(is_glazing=True)`; `geometry.py`
+`simplify_to_quad` reduces a >4-vertex opening to its in-plane bounding rectangle;
+`idf_writer.py` emits per-window `Construction_Name` + `WindowMaterial:SimpleGlazingSystem`.
+
+### DONE (verified — see below)
+- **`geometry/rings.py` `simplify_to_quad(points)`** — E+ caps `FenestrationSurface:Detailed`
+  at **4 vertices** (a real E+ limit, unlike the eppy quirk on wall surfaces). Reduce a
+  pentagon/hexagon window to its 4-corner **in-plane bounding rectangle**: Newell normal →
+  orthonormal (u,v) basis IN the plane → project to 2D → axis-aligned bbox → 4 corners back
+  to 3D, wound to preserve the outward normal. Coplanar with + bounded by the original;
+  ≤4 verts pass through unchanged. Mirrors the prof's `simplify_to_quad`.
+- **Per-window glazing** — `model/constructions.py` new public `window_glazing(doc, window_el)`:
+  reads the Window's OWN `nrg3:layeredConstruction` and runs it through the existing
+  `_glazing_from_citygml` (uValue→U-Factor, gValue / FIRST solar transmittance→SHGC, visible
+  transmittance→Visible Transmittance, omitted when absent) → a `WindowConstruction`.
+- **`model/model.py`** — `Window` gains `construction` (glazing name); `WindowConstruction`
+  gains `visible_transmittance` + `provenance`; **`Model.window_construction` (single) →
+  `Model.window_constructions` (dict name→WindowConstruction)**; `subset_for_building` slices
+  the glazings the building's windows use.
+- **`model/openings.py`** — `explicit_windows` now: `simplify_to_quad` the ring, resolve the
+  window's glazing via `constructions.window_glazing` (or `default_window_construction()` when
+  the window has none), register it in `window_constructions` (dedupe by name), set
+  `Window.construction`. WWR-synthesized windows use the default glazing. `resolve_windows`
+  fills `model.window_constructions`.
+- **`write/writer.py`** — `add_window_constructions` emits EVERY glazing (SimpleGlazingSystem +
+  Construction), writing `Visible_Transmittance` (IDD N3) ONLY when present; `add_windows` uses
+  each `window.construction`. `run.py`/`writer.main` pass `model.window_constructions`.
+
+### VERIFIED (`PYTHONHASHSEED=0`)
+- **Case 2.1** (no windows) — IDF still **byte-identical** to baseline (regression guard).
+- **`id_building_2`** (4 windows) — exit=0, 0 severe; windows now reference the REAL glazing
+  `layered_constr_library_code_5`: `SimpleGlazingSystem` U=**1.9** (was default 2.8), SHGC=**0.7**
+  (first of two solar τ, warn), **no** Visible Transmittance line (correctly omitted). *(IDF
+  intentionally changed — more correct — so no longer byte-identical, as expected for this feature.)*
+- **`id_building_11`** (multizone, has a **5-vertex** pentagon window) — **NOW BUILDS** (was the
+  parked `BadEPFieldError: Vertex_5` crash), exit=0, 0 severe, 8 windows; pentagon → quad
+  (area 27.03→31.03, the in-plane bbox). Remaining 63 warnings are pre-existing sample-geometry
+  issues (unenclosed zone, collinear vertices, entered-volume≠calculated), not window-related.
+- Full Alderaan parse sweep (`openings` demo): every explicit window resolves glazing
+  `layered_constr_library_code_5`; LoD1 boxes = 0 windows. No crashes.
+- `py_compile` clean; `simplify_to_quad` unit-checked (pentagon→4 corners; ≤4 unchanged).
+
+### LEFT (window follow-ups, lower priority)
+- **Detailed panes** (`WindowMaterial:Glazing` + per-side emissivity/reflectance, `glazing_5`
+  carries them) — still DEFERRED (Rung A); SimpleGlazingSystem is the current path.
+- **`glazingRatio`** (0.95 on the glazing construction) → geometry rung for LoD1/2 — still parked.
+- Author dedicated window sample cases (full-data glazing incl. visible; WWR-only).
+- Then: archetype JSON wiring (last), remaining Table-2 cases.
+
+## 2026-07-07 (cont.) — DATACLASS REFACTOR COMPLETE: dual view collapsed to ONE `model.Model`
+
+Finished the migration the previous entry set up. `Surface`, `Zone`, `Building`,
+`WindowConstruction`, `Model` were added to `model/model.py`; the parser builds them
+directly; **the whole trace/idf dual view + `idf_model.py` + the conversion layer are
+GONE**. There is now ONE typed middle layer, and the two per-building JSONs merged into one.
+
+### What changed (each verified — see VERIFICATION)
+- **`model/model.py`** — added `Surface` (the spine: source_id, source_gml_id, type_name,
+  role, surface_type, boundary, points, area, construction, zone, boundary_object, windows,
+  construction_context_ids, surface_part_index/count, `provenance`), `Zone`, `Building`
+  (id, zones, surfaces, lod, surface_path, origin_offset, provenance), `WindowConstruction`,
+  and `Model` (crs, buildings, constructions, materials, window_construction) with
+  `.building(id)` + `.subset_for_building(id)`.
+- **`semantics/building_surfaces.py`** — `process_surfaces` now returns `Surface` objects
+  (was dicts); `semantic_trace` folded into `provenance` (role/surface_type/boundary lines).
+- **`model/reader.py`** — `build_middle_layer(doc)` builds `Building`/`Surface`, recentres,
+  then enriches ONE `Model` (constructions → openings → zones). `geometry_trace` → flat
+  `provenance["points"]/["area"]`. **Deleted** `build_trace_middle_layer`,
+  `to_idf_middle_layer`, `_surface_for_idf`, `_building_for_idf`,
+  `_window_construction_for_idf`, `build_both_middle_layers`, `build_idf_middle_layer`.
+  Surfaceless (LoD0) buildings stay in the Model but are warned + skipped by the writer.
+- **`model/constructions.py`** — `resolve_all`/`_resolve_surface` use attribute access;
+  `construction_trace` dict replaced by one line `_construction_provenance_line` →
+  `Surface.provenance["construction"]`. `middle.buildings`/`.constructions`/`.materials`.
+- **`model/openings.py`** — attribute access; `default_window_construction()` now returns a
+  `WindowConstruction` (was a dict); sets `middle.window_construction`.
+- **`model/zones.py`** — attribute access; `make_partner` builds a `Surface` (was a dict);
+  `_single_zone`/`assign_zones` build `Zone` objects into `building.zones`; `zone_trace` →
+  `Surface.provenance["zone"]` / `Zone.provenance`.
+- **`write/writer.py`** — imports `Zone` (was `IdfZone`), calls `build_middle_layer`; `main`
+  skips surfaceless buildings.
+- **`run.py`** — one `Model` via `build_middle_layer`; dumps ONE `middle_layer_<id>.json`
+  (was `middle_layer_trace_<id>.json` + `middle_layer_idf_<id>.json`); deleted
+  `single_building_middle_layer`/`_building_by_id`.
+- **`model/idf_model.py` DELETED.**
+- **Docs**: `CLAUDE.md` architecture section rewritten (one model, no dual view); this entry.
+
+### VERIFICATION (all green, `PYTHONHASHSEED=0`)
+- Baselines captured from the previous commit-state working tree BEFORE editing (scratchpad).
+- **Case 2.1** (`input/cases/case2.1_lod2_1zone_nowin_synth.gml`) — IDF **byte-identical**, exit=0, OK.
+- **Alderaan `id_building_2`** (SolidMaterial+AirGap+layered+4 windows) — IDF **byte-identical**, exit=0, OK.
+- Verified after BOTH Phase A (Surface only, conversion layer kept) AND Phase B (full collapse).
+- `py_compile` clean on all changed modules; module self-tests (`reader`/`zones`/`openings`) run.
+- The one JSON is well-formed; `provenance` reads cleanly (e.g. surface: role/surface_type/
+  boundary/points/area/construction/zone lines; zone: name/volume/ownership lines).
+
+### NOT verified end-to-end (pre-existing, NOT a regression)
+- **`make_partner` / interzone Surface pairs are UNEXERCISED by the samples**: 0 Alderaan
+  buildings produce interzone pairs (the known source_id-matching gap — Gap #1). The change
+  there is a mechanical dict→`Surface` translation (py_compile-clean, same fields).
+- **`id_building_11` (multizone+windows) still fails** with eppy `BadEPFieldError:
+  Vertex_5_Xcoordinate` — a **>4-vertex WINDOW** hitting E+'s 4-vertex fenestration cap.
+  **Confirmed identical failure on the committed code (git stash test)** → pre-existing parked
+  limitation (2026-07-04: needs `simplify_to_quad` in openings), not caused by this refactor.
+
+### LEFT (unchanged from below)
+- **Glazing wiring** (Rung B, Step 2+): `_glazing_from_citygml` is built but NOT wired; every
+  window still gets the single default `FALLBACK_WINDOW`. Now that `WindowConstruction` lives
+  in `model.py`, add `visible_transmittance`, per-window resolution in `openings.py`, and
+  writer emission. Then the >4-vertex-window `simplify_to_quad` so multizone+window buildings build.
+- Author the remaining Table-2 cases; archetype JSON wiring is last.
+
+## 2026-07-07 — Middle-layer refactor to ONE dataclass model (`model.py`) + window-glazing status (superseded by the entry above)
+
+Two in-flight threads. This entry is written so a NEW chat can continue both.
+
+### AIM (why we are doing this)
+Collapse the heavy **dual-view middle layer** — a nested `trace` dict PLUS separate `idf_model.py`
+dataclasses, bridged by a hand-written conversion layer — into **ONE set of dataclasses** in a new
+`citygml2idf/model/model.py` (the shape the prof's repo uses). Goals: modularity + readability, one
+shape per concept, far less nesting. **Tracking is KEPT but FLAT**: each object carries a
+`provenance` dict (`field -> "one readable line: what we did"`) instead of a 6-key nested trace dict —
+serves the professor's "express what we did for each parameter" ask, but readable.
+
+### THE PATTERN (how each type is migrated — repeat for every type)
+1. Add the dataclass to `model.py` (with a `provenance: dict` field).
+2. The PARSER builds the dataclass directly; nested trace dict -> flat provenance strings.
+3. Consumers use ATTRIBUTE access (`.x`, not `["x"]` / `.get("x")`).
+4. DELETE the `idf_model.py` `IdfX` class + its `to_jsonable()` + the reader `_x_for_idf` converter.
+5. Serialization: `model.py` has ONE `to_jsonable(obj)` (dataclass -> dict, dropping None, recurses).
+   Used as `json.dump(..., default=to_jsonable)` at every trace-dump site (reader.py, run.py).
+
+### VERIFICATION — MANDATORY EACH STEP (nothing may change the IDF)
+The pipeline is **non-deterministic run-to-run** (materials/constructions emitted in set-iteration
+order + Python per-process hash randomization), so byte-diff only works with a **pinned hash seed**:
+```
+export PYTHONHASHSEED=0
+PYTHONPATH=. python -m citygml2idf.run "citygml2idf/input/cases/case2.1_lod2_1zone_nowin_synth.gml"
+PYTHONPATH=. python -m citygml2idf.run --building id_building_2 "citygml2idf/validation_file/Alderaan_Energy_ADE_All.gml"
+diff citygml2idf/output/runs/<id>/<id>.idf  <baseline>/<id>.idf     # MUST be byte-identical
+```
+Two verification buildings (chosen to cover the material/construction/window kinds):
+- **Case 2.1** (`input/cases/case2.1_lod2_1zone_nowin_synth.gml`) — NoMass (uValue) path, no windows.
+- **Alderaan `id_building_2`** — SolidMaterial + AirGap + layered constructions + **4 windows**.
+Each step: `py_compile` clean, regenerate both with `PYTHONHASHSEED=0`, IDFs **byte-identical** vs a
+baseline, E+ **exit=0, 0 Severe**. (Baselines were kept in `/tmp/baseline`, which is EPHEMERAL —
+a new chat should re-capture them from a clean checkout of the last commit, OR `git stash` the
+refactor, regenerate, unstash.) The trace JSON *does* change shape (flatter) — that is intended,
+not a regression; only the `.idf` must match.
+
+### DONE this session (each verified byte-identical + E+ exit=0)
+- **`model.py` created**: `Material`, `Construction`, `Window` dataclasses + the `to_jsonable` helper.
+- **Material**: `materials.py` builds `Material` (flat provenance); `constructions.py` NoMass +
+  `DEFAULT_MATERIAL` are `Material`; attribute access. Removed `IdfMaterial` + `_material_for_idf`.
+- **Construction**: `constructions.py` `_from_citygml`/`_resolve_surface` return `Construction`;
+  `zones.py` reversed interzone twin builds `Construction`; removed `IdfConstruction`,
+  `_construction_for_idf`, `_with_context`.
+- **Window**: `openings.py` builds `Window` (flat provenance; dropped `_window_synthesis_trace`,
+  dict key `"from"`->`source`, `"trace"`->`provenance`); `reader._surface_for_idf` uses `Window`
+  directly (no more `IdfWindow` + deepcopy); removed `IdfWindow`.
+- Serialization wired: `reader.py` + `run.py` `json.dump(..., default=to_jsonable)`. (`units.py`
+  pandas was already dropped earlier this session.)
+
+### LEFT — NEXT STEP is the SPINE (biggest + riskiest): `Surface` (+ `Zone`, `Building`, `WindowConstruction`)
+- **`Surface`** is the working structure EVERY parser stage MUTATES, so it touches ~86 real access
+  sites across 5 modules (grep counts: `zones.py` 44, `reader.py` 29, `openings.py` 8,
+  `constructions.py` 5, `building_surfaces.py` 2). Flow:
+  - `semantics/building_surfaces.py` `process_surfaces` CREATES the dict (`surfaces.append({...})`:
+    keys `source_id, source_gml_id, type_name, role, surface_type, boundary, points,
+    construction_context_ids, semantic_trace`).
+  - `reader.py` `build_trace_middle_layer` sets `s["points"]` (reproject + recenter), `s["area"]`,
+    `s["geometry_trace"]`.
+  - `constructions.py` reads `s["source_gml_id"]/s["source_id"]/s.get("construction_context_ids")`;
+    sets `s["construction"]`, `s["construction_trace"]`.
+  - `openings.py` reads `surface.get("role"/"boundary"/"surface_part_count"/"surface_part_index"/
+    "source_gml_id"/"source_id"/"points")`; sets `surface["windows"]` (now a list of `Window`).
+  - `zones.py` reads/sets many keys; `make_partner` BUILDS a partner surface DICT (must become a
+    `Surface`); sets `surface["zone"]`, `surface["boundary"]`, `surface["boundary_object"]`.
+  - `reader.py` `_surface_for_idf` builds `IdfSurface` from the dict.
+  - `idf_building_visualize.py` reads the **to_jsonable dict** (via `IdfBuilding.to_jsonable`), NOT the
+    dataclass — so it is UNAFFECTED as long as the JSON shape is preserved.
+  RISK: a `Surface` dataclass needs all clean fields (`source_id, source_gml_id, surface_type,
+  boundary, role, points, area, type_name, construction, zone, boundary_object,
+  surface_part_count, surface_part_index, construction_context_ids`) + fold the trace fields
+  (`geometry_trace, semantic_trace, construction_trace`) into `provenance`. Do it carefully,
+  attribute-by-attribute; verify byte-identical after.
+- **`Zone`** (small): `building["zones"]` dicts (`name, volume`) -> `Zone`; remove `IdfZone`.
+- **`Building`** (small): reader `_building_for_idf` -> `Building` (`id, zones, surfaces`); remove `IdfBuilding`.
+- **`WindowConstruction`** (glazing, small): `idf_model.py` dataclass (`name, u_factor, shgc`) ->
+  move to `model.py`; add `visible_transmittance` when the glazing thread lands (below).
+- **FINALLY** delete the whole conversion layer (`to_idf_middle_layer`, `_surface_for_idf`,
+  `_building_for_idf`, `_window_construction_for_idf`) and collapse the DUAL VIEW to ONE model. The
+  two JSON dumps (`middle_layer_idf_*.json` + `middle_layer_trace_*.json`) merge into ONE
+  `middle_layer_*.json` (writer reads the fields it needs, ignores `provenance`). `IdfModel` ->
+  `Model` in `model.py`; `idf_model.py` disappears.
+
+### PARALLEL THREAD — WINDOW GLAZING (Rung B, simple) — resolver BUILT, NOT yet WIRED to windows
+Independent of the dataclass refactor (this is the window PHYSICS). Status:
+- **DONE**: `_glazing_from_citygml` in `constructions.py` (the glazing "kind", like the prof's
+  `is_glazing`): `nrg3:uValue` -> U-Factor; `nrg3:gValue` else **FIRST** solar
+  `nrg3:transmittance.fraction` -> SHGC (warn on duplicate solar); **visible**
+  `nrg3:transmittance` -> Visible Transmittance (OMIT when absent). Clamps SHGC/VT to open (0,1).
+  `_glazing_transmittances` is the ONE place `nrg3:transmittance` is parsed (solar AND visible).
+  Verified on Alderaan `glazing_5`: U=1.9, SHGC=0.7 (first solar tau, 2 present -> warn), Visible=omitted.
+- **DECISIONS** (with prof + user): per-window resolution; SHGC from solar transmittance directly
+  (approx, SHGC >= tau); **SimpleGlazingSystem now, detailed `WindowMaterial:Glazing` DEFERRED**
+  (Rung A). Schema fact: `Transmittance` has NO inside/outside (only `Reflectance`/`Emissivity` do),
+  so the two solar tau in `glazing_5` are ambiguous sample data -> first-wins + warn. `glazingRatio`
+  -> geometry (parked). Window PROCESS = detailed(has layers) -> simple(uValue) -> default, mirroring
+  the opaque waterfall. E+ target IDF datasets are in `validation_file/Window*.idf` (gitignored by
+  the blanket `*.idf` rule).
+- **NOT DONE** — the wiring, Step 2+ of the window plan:
+  1. `openings.py`: each `bldg:Window` reads its OWN `nrg3:layeredConstruction`, calls
+     `_glazing_from_citygml`, attaches a per-window glazing construction (dedupe by name).
+  2. `WindowConstruction` gains `visible_transmittance`; each window carries its construction name.
+  3. `writer.py`: emit ALL window glazings (write `Visible Transmittance` ONLY when present) +
+     per-window `Construction_Name`.
+  4. Author 2 sample cases: full-data glazing (uValue+gValue+visible) and Alderaan-pattern
+     (uValue + solar tau only). Run, prove exit=0.
+  Currently every window still gets ONE default `FALLBACK_WINDOW` glazing
+  (`openings.default_window_construction`).
+
+### CONTEXT a new chat needs
+- **Excel fully removed** earlier this session; construction resolution is the RAW CONVERTER
+  (T1 detailed layers -> T2 `uValue`->NoMass -> T4 default); archetype fallback deferred to a JSON
+  stub (`model/archetypes.py` + `input/archetypes.json`, UNWIRED, keyed by function/year/weight).
+- **Layer order**: middle layer stores ADE inside->outside; `writer._energyplus_layers` reverses to
+  E+ outside->inside (verified on `id_building_2`). `layer_order` lives on `Construction`.
+- **Last commit `6fd8033`** ("Remove Excel; raw-converter constructions + JSON archetype stub +
+  simple glazing (Rung B)") is BEFORE this dataclass refactor — the whole refactor (Material +
+  Construction + Window) is currently UNCOMMITTED in the working tree.
+- Golden rule + schema-first still apply (CLAUDE.md). Schema source: `validation_file/CityGml_ADE_SChema/`.
+  EnergyPlus rules: vendored `templates/Energy+.idd` + BigLadder v23.1.
+
+### RESUME INSTRUCTIONS for the new chat
+1. Re-capture `PYTHONHASHSEED=0` baselines for Case 2.1 + `id_building_2` (from the current working
+   tree — the refactor so far is verified good).
+2. Continue the dataclass refactor: migrate **`Surface`** (spine, careful, attribute access across
+   the 5 modules) -> verify byte-identical + exit=0 -> then `Zone`/`Building`/`WindowConstruction`
+   -> then DELETE the conversion layer and collapse to one `Model`/one JSON.
+3. Separately, finish the **glazing wiring** (Step 2+ above) when ready.
+
 ## 2026-07-06 — Excel REMOVED entirely; construction resolution is now a pure RAW CONVERTER (+ deferred JSON archetype stub)
 
 Studied the prof's repo (`piotre13/CityGML2Eplus`) and his latest meeting notes: build a **raw
