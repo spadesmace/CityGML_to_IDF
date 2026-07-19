@@ -1,12 +1,9 @@
 """
-what id does :
-assemble the ONE typed middle layer (model.Model) from the parsers.
+Build the typed middle layer Model from CityGML parser output.
 
-The parser has one path and ONE view: a Model holding Building -> Zone / Surface ->
-Window, plus the constructions/materials they use. Every object also carries a flat
-`provenance` map (what we did to each parameter) for audit/teaching; the writer reads
-the fields it needs and ignores provenance. There is no separate trace/idf split and no
-separate test parser.
+The reader assembles buildings, zones, surfaces, windows, constructions, and
+materials into one Model. Objects also carry provenance for audit/teaching;
+IDF generation reads only the fields it needs.
 """
 
 from __future__ import annotations
@@ -20,6 +17,7 @@ from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID
 from ..geometry import rings
 from ..semantics import building_surfaces
+from . import adjacency
 from . import constructions
 from . import openings
 from . import zones
@@ -31,20 +29,22 @@ OUTPUT_DIR = os.path.join(_PKG, "output")
 
 
 def _parse_epsg(srs_name):
-    """EPSG code at the end of an srsName ('...EPSG::25832' -> 25832, or None). Recorded
-    for audit only — coordinates are assumed already metric (we do NOT reproject)."""
+    """Extract a trailing EPSG code from srsName for audit only."""
     if not srs_name:
         return None
     match = re.search(r"(\d+)\s*$", srs_name.strip())
     return int(match.group(1)) if match else None
 
-
-def build_middle_layer(doc):
+# One global store, parsed once
+def build_middle_layer(doc, detailed_interior=False):
     """Parse every building into the ONE typed middle layer (model.Model).
 
     Every object carries its data plus a flat `provenance` map (what we did per field)
     for audit. A building with no usable surfaces (e.g. LoD0 footprint only) is KEPT in
-    the Model for the audit trail but warned about; the writer skips it.
+    the Model for the audit trail but skipped during IDF generation.
+
+    detailed_interior: False (default) = FAST indoor model (interior faces Adiabatic);
+                       True = model interior heat transfer (see model/zones.py rung 0).
     """
     # 1. geometry + roles per building (points still in the file's CRS)
     buildings = []
@@ -53,8 +53,7 @@ def build_middle_layer(doc):
         buildings.append(Building(id=b.get(GML_ID), lod=lod_n,
                                   surface_path=surface_path.value, surfaces=surfaces))
 
-    # 2. coordinates are assumed METRIC (CityGML building geometry is authored in a
-    #    projected CRS); we record the srsName/EPSG for audit but do NOT reproject.
+    # 2. Assume input coordinates are already metric; record srsName/EPSG for audit.
     src_epsg = _parse_epsg(xml_io.srs_name(doc))
     for bld in buildings:
         for s in bld.surfaces:
@@ -81,26 +80,20 @@ def build_middle_layer(doc):
                        "units": "assumed_metric"},
                   buildings=buildings)
 
-    # These modules enrich the same Model in place (parser concerns).
+    # These modules enrich the same Model in place (parser concerns). adjacency reads the
+    # schema-native FACTS (isAdiabatic / relatedTo-adjacent) onto each Surface; zones then
+    # turns zone ownership + those facts into the EnergyPlus boundary. 
+    # NOTE interzone windows (not modelled): openings runs BEFORE zones, so a window is attached
     constructions.resolve_all(doc, model)
     openings.resolve_windows(doc, model)
-    zones.assign_zones(doc, model)
+    adjacency.attach_facts(doc, model)
+    zones.assign_zones(doc, model, detailed_interior=detailed_interior)
 
     for bld in model.buildings:
         if not bld.surfaces:
             xml_io.warn(f"building {bld.id}: no surfaces "
                         f"(surface_path={bld.surface_path}); skipped from IDF output")
     return model
-
-
-def write_middle_layer(doc, out_path=None):
-    """Build and dump the middle layer (model.Model) to JSON."""
-    model = build_middle_layer(doc)
-    out_path = out_path or os.path.join(OUTPUT_DIR, "middle_layer.json")
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(model, f, indent=2, default=to_jsonable)
-    return model, out_path
 
 
 def _demo(path=None):

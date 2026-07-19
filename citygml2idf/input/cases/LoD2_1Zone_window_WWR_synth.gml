@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   CASE — LoD2, single thermal zone, WITH windows (via WWR), DETAILED-LAYER constructions.
-  A 10 x 10 x 3 m box + one thermal zone. Each WALL carries nrg3:bdgBdrySurfOpeningToSurfaceRatio
-  = 0.3, so openings.py SYNTHESIZES a window (branch B) coplanar with the wall (area = 0.3 x wall).
+   Each WALL carries nrg3:bdgBdrySurfOpeningToSurfaceRatio
+   SYNTHESIZES a window 
   Constructions are DETAILED LAYERS with real nrg3:SolidMaterial (+ one nrg3:Gas air gap), so the
   zone has THERMAL MASS -> stable with windows. Some SolidMaterial fields are DELIBERATELY left out
   (wall insulation: NO density; wall plaster: NO specificHeat; roof insulation: NO conductivity) to

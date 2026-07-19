@@ -1,23 +1,6 @@
 """
-model/model.py — the single TYPED middle layer (dataclasses used everywhere).
-
-We are migrating, one data type at a time, from the old dual view (a nested `trace`
-dict + the separate idf_model.py dataclasses, bridged by a hand-written conversion layer)
-to ONE set of dataclasses — the shape the reference repo (piotre13/CityGML2Eplus)'s
-model.py uses. Each object carries its data PLUS a flat `provenance` map:
-
-    provenance[field] = "one readable line — WHAT we did to this parameter"
-    e.g. "citygml 40mm -> 0.040 m"   or   "default 900.0 J/kg-K (specificHeatCapacity not in CityGML)"
-
-That replaces the old 6-key nested per-field trace dict: same audit intent (the professor's
-"express what we did for each parameter"), one line instead of a tree.
-
-`to_jsonable(obj)` is the ONE serializer — usable directly as `json.dump(..., default=to_jsonable)`.
-It turns any dataclass into a dict (dropping None fields) and recurses dicts/lists.
-
 This module now holds the WHOLE typed middle layer (Material, Construction, Window,
-Surface, Zone, Building, WindowConstruction, Model). The old dual view — a nested trace
-dict + a separate idf_model.py + a hand-written conversion layer — is gone: there is one
+Surface, Zone, Building, WindowConstruction, Model).there is one
 Model, and the writer reads the fields it needs and ignores `provenance`.
 """
 
@@ -49,8 +32,8 @@ class Construction:
     construction carried nothing usable (the resolver then falls to the default)."""
     name: str
     layers: list = field(default_factory=list)          # material names, ADE inside->outside
-    layer_order: str = "inside_to_outside"
-    source: str = ""                                    # citygml_layers | citygml_uvalue | default | reversed
+    layer_order: str = "inside_to_outside"              # layer_order describes the stored list as seen from the zone that owns the surface using it
+    source: str = ""                                    # citygml_layers | citygml_uvalue | default
     source_context_id: Optional[str] = None             # owner (surface/zone/building) it resolved from
     provenance: dict = field(default_factory=dict)      # notes (uValue conversion, reversed_of, …)
 
@@ -72,9 +55,8 @@ class Surface:
     """One envelope face (E+ BuildingSurface:Detailed). This is the SPINE: every parser
     stage mutates it in place — building_surfaces creates it (geometry + role), reader
     fills metric points + area, constructions sets `construction`, openings appends
-    `windows`, zones sets `zone`/`boundary`/`boundary_object` (+ the reciprocal twin).
-    `provenance` folds the old geometry/semantic/construction/zone trace dicts into one
-    readable line per field."""
+    `windows`, adjacency sets the facts below, zones sets `zone`/`surface_type` (orientation)
+    /`boundary`/`boundary_object`. `provenance` records one readable line per field."""
     source_id: str
     source_gml_id: str = ""
     type_name: str = ""                                 # CityGML/ADE label, or "classified"
@@ -86,6 +68,9 @@ class Surface:
     construction: str = ""                              # construction name (key into Model.constructions)
     zone: str = ""                                      # owning E+ Zone name
     boundary_object: str = ""                           # A7 partner surface name (interzone pair), else ""
+    # --- schema-native adjacency FACTS (model/adjacency.py); zones.py turns them into a boundary ---
+    is_adiabatic: Optional[bool] = None                 # nrg3:bdgBdrySurfIsAdiabatic (None = file is silent)
+    adjacent_ids: list = field(default_factory=list)    # relatedTo/CityObjectRelation[adjacent] target gml:ids
     windows: list = field(default_factory=list)         # list[Window]
     construction_context_ids: list = field(default_factory=list)   # zone/building ids for construction fallback
     provenance: dict = field(default_factory=dict)      # field -> "what we did" (one line)
@@ -95,7 +80,6 @@ class Surface:
 class Zone:
     """One E+ Zone (one per nrg3:ThermalZone, or one implicit building zone)."""
     name: str
-    volume: Optional[float] = None                       # m3, or None -> EnergyPlus autocalculates
     provenance: dict = field(default_factory=dict)
 
 
@@ -143,19 +127,24 @@ class Model:
         return None
 
     def subset_for_building(self, building_id):
-        """A new Model holding ONE building + only the constructions/materials/glazings it uses."""
+        """A new Model holding ONE building + only the constructions/materials/glazings it uses.
+
+        The sets answer only "is this name used?"; the subset dicts are built by iterating
+        the POOLS, whose insertion order is the GML discovery order. Iterating the sets
+        instead made the same input produce a differently-ordered IDF/JSON on every run
+        (Python reshuffles a set of strings per process)."""
         building = self.building(building_id)
         if building is None:
             raise KeyError(f"building '{building_id}' not found")
         construction_names = {s.construction for s in building.surfaces if s.construction}
-        constructions_used = {name: self.constructions[name]
-                              for name in construction_names if name in self.constructions}
+        constructions_used = {name: c for name, c in self.constructions.items()
+                              if name in construction_names}
         material_names = {m for c in constructions_used.values() for m in c.layers}
-        materials_used = {name: self.materials[name]
-                          for name in material_names if name in self.materials}
+        materials_used = {name: m for name, m in self.materials.items()
+                          if name in material_names}
         glazing_names = {w.construction for s in building.surfaces for w in s.windows if w.construction}
-        glazings_used = {name: self.window_constructions[name]
-                         for name in glazing_names if name in self.window_constructions}
+        glazings_used = {name: g for name, g in self.window_constructions.items()
+                         if name in glazing_names}
         return Model(crs=self.crs, buildings=[building],
                      constructions=constructions_used, materials=materials_used,
                      window_constructions=glazings_used)

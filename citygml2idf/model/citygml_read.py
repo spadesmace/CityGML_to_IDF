@@ -14,10 +14,6 @@ from __future__ import annotations
 from .units import _num
 
 
-def _first_el(doc, prop):
-    """The object inside a property: its inline child, or the xlink it points to."""
-    return doc.property_object(prop)
-
 
 def _child_text(doc, parent, prefix, local):
     """First child's stripped text, or None."""

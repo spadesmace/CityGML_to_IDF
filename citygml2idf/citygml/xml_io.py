@@ -78,7 +78,7 @@ class CityGMLDoc:
     """A loaded CityGML file plus the two things every other module needs:
     a resolved namespace map and a gml:id -> element registry."""
 
-    def __init__(self, path):
+    def __init__(self, path): 
         if not path:
             raise SystemExit("CityGMLDoc: pass a CityGML/.gml path")
         self.path = path
@@ -93,7 +93,7 @@ class CityGMLDoc:
 
     # --- setup -------------------------------------------------------------
     def _resolve_namespaces(self):
-        # WHY: keep our stable URIs, but auto-adopt the file's actual Energy ADE
+        #  keep our stable URIs, but auto-adopt the file's actual Energy ADE
         # URI if it targets a slightly different version — otherwise a new file
         # could silently match nothing.
         ns = dict(NS)
@@ -103,7 +103,7 @@ class CityGMLDoc:
         return ns
 
     def _index_by_id(self):
-        # WHY: build the xlink registry once (see point 2 in the module docstring).
+        #  build the xlink registry once
         idx = {}
         for el in self.root.iter():
             gid = el.get(GML_ID)
@@ -155,7 +155,7 @@ class CityGMLDoc:
         warn(f"external xlink href not resolvable locally: '{href}'")
         return None
 
-    def property_object(self, property_el):
+    def property_object(self, property_el): #generic resolver 
         """Return the object carried by a CityGML/ADE property element.
 
         XSD pattern, used everywhere in CityGML:

@@ -100,3 +100,23 @@ def orient_outward(points, interior_point):
         pts = list(reversed(pts)) # # flip it
         n = -n
     return pts, n
+
+
+def orient_like(points, reference_normal):
+    """Return (ring, unit_normal) wound so its normal AGREES with reference_normal.
+
+    The SUB-SURFACE twin of orient_outward. A window/door lies INSIDE a wall, so its
+    reference is not the zone centroid (a window's own centre gives no in/out information —
+    it is coplanar with its wall) but the WALL'S OWN outward normal: a window faces the same
+    way as the wall it sits in.
+
+    Needed because EnergyPlus is told (GlobalGeometryRules) that every polygon is entered
+    Counterclockwise "as viewed from OUTSIDE the surface", and CityGML does not guarantee any
+    winding. A window wound the other way CRASHES EnergyPlus outright (measured: exit
+    0xC0000409, empty eplusout.err) — it does not merely warn."""
+    pts = drop_closing_point(points)
+    n = unit_normal(pts)
+    if float(np.dot(n, np.asarray(reference_normal, dtype=float))) < 0.0:
+        pts = list(reversed(pts))
+        n = -n
+    return pts, n
