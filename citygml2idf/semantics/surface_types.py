@@ -35,7 +35,7 @@ SURFACE_TYPES = {
     "OuterCeilingSurface": SurfaceRule("outer_ceiling", "Floor", "Outdoors"),
 
     # ---- Energy ADE 3.0 (nrg3:) interior interfaces
-    "PartyWallSurface":         SurfaceRule("party_wall",        "Wall",          "Adiabatic"), # NOTE indoor wall
+    "PartyWallSurface":         SurfaceRule("party_wall",        "Wall",          "Adiabatic"),
     "IntermediateFloorSurface": SurfaceRule("intermediate_floor","FloorOrCeiling","Adiabatic"),
     "AtticFloorSurface":        SurfaceRule("attic_floor",       "FloorOrCeiling","Adiabatic"),
     "BasementCeilingSurface":   SurfaceRule("basement_ceiling",  "FloorOrCeiling","Adiabatic"),

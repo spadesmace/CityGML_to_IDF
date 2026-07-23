@@ -10,6 +10,23 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Optional
 
 
+# ===== provenance status vocabulary (shared by every model builder) ==========
+# A VALUE field (one that could be "the file's number OR our default") records one entry:
+# a machine-readable STATUS + a human note.
+#   ok       stated, converted, EnergyPlus accepts it  -> the REAL value
+#   absent   not stated                                -> field default
+#   invalid  stated but unusable (uom we reject, or a value the IDD rejects) -> field default
+# absent and invalid both fall back, but only `invalid` means a real value was LOST.
+# DESCRIPTIONS (geometry, area, which-tier, layer order) stay plain strings — no default to
+# contrast with, so no status.
+OK, ABSENT, INVALID = "ok", "absent", "invalid"
+
+
+def trace(status, note):
+    """One VALUE-field provenance entry: {status, note}."""
+    return {"status": status, "note": note}
+
+
 @dataclass
 class Material:
     """One EnergyPlus material object, tagged by `eplus`. Only the fields that object

@@ -125,7 +125,7 @@ class CityGMLDoc:
         """All matching elements at any depth under `el`."""
         return el.findall(f".//{self.qualified_name(prefix, local)}")
 
-    def children(self, el, prefix, local):
+    def children(self, el, prefix, local): 
         """Immediate children only — matters when the same type can nest."""
         want = self.qualified_name(prefix, local)
         return [c for c in el if c.tag == want]
@@ -167,7 +167,7 @@ class CityGMLDoc:
         """
         inline = next((child for child in property_el if isinstance(child.tag, str)), None)
         href = property_el.get(XLINK_HREF)
-        if inline is not None and href:
+        if inline is not None and href:  # if we have both, keep inline (most local)
             warn(f"property <{local_name(property_el)}> has both inline object and xlink '{href}'; using inline")
         if inline is not None:
             return inline

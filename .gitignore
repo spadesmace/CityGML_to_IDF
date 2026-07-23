@@ -29,3 +29,11 @@ citygml2idf/templates/EnergyPlusToFMU/
 
 # Local generated previews
 *_preview.png
+
+# Docs / notes kept local only, never pushed
+*.md
+
+# Local-only runner + template data (EnergyPlus/FMU software is not in the repo).
+# Only Energy+.idd stays tracked in templates/.
+citygml2idf/run_energyplus.py
+citygml2idf/templates/*.json

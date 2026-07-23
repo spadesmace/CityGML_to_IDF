@@ -30,7 +30,7 @@ from ..citygml.xml_io import GML_ID, local_name, warn
 from ..geometry import rings
 from . import constructions
 from .citygml_read import _child_measure
-from .model import Window, WindowConstruction
+from .model import ABSENT, Window, WindowConstruction, trace
 from .units import to_reference
 
 FALLBACK_WINDOW = {"name": "DEFAULT_WINDOW", "u_factor": 2.8, "shgc": 0.7}   # last resort
@@ -42,7 +42,8 @@ def default_window_construction():
     U-Factor <- u_factor, SHGC <- shgc; no visible transmittance). Used for synthesized (WWR)
     windows and for explicit windows that carry no nrg3:layeredConstruction."""
     return WindowConstruction(**FALLBACK_WINDOW,
-                              provenance={"source": "default FALLBACK_WINDOW (no window construction in CityGML)"})
+                              provenance={"source": trace(ABSENT, "default FALLBACK_WINDOW "
+                                                                  "(no window construction in CityGML)")})
 
 
 def _register_glazing(glazing, window_constructions):
@@ -64,10 +65,7 @@ def window_ring(doc, window_element):
 # LOD 3
 def explicit_windows(doc, wall_element, wall_points, origin_offset, window_constructions):
     """LoD3 explicit `bldg:Window` polygons, recentred to the building origin, each with
-    its OWN glazing construction. Windows with >4 corners are reduced to their in-plane
-    bounding quad (E+ caps fenestration at 4 vertices). Doors are skipped -> opaque 
-    Coordinates are assumed metric, exactly like surfaces (no CRS reprojection), so the
-    same origin offset applies to both.
+    its OWN glazing construction.
 
     WINDING: the file's vertex order is NEVER trusted — the same  rule the walls already
     follow (rings.orient_outward). A window is re-wound to face the SAME WAY AS ITS WALL
@@ -123,27 +121,19 @@ def explicit_windows(doc, wall_element, wall_points, origin_offset, window_const
 #              NOTE: a wall's own LayeredConstruction MAY legally carry a gValue (XSD
 #              LayeredConstructionType, and Energy ADE spec case 5.1: "LayeredConstruction
 #              objects (i.e. for U and g values) are associated to the building thematic
-#              surfaces/openings"). Alderaan contains ZERO gValue elements, so the default is
-#              all we can do today; if a real file ever states one, prefer it over the default.
-
-# STILL OPEN — AN UNKNOWN `uom` COSTS THE WINDOW. openingToSurfaceRatio is a gml:ScaleType, so its
-# uom is REQUIRED and may legally be `%` / permil / ppm — we convert those. But per the project
-# rule "unknown unit -> use the default, never guess", an UNRECOGNISED uom makes
-# units.to_reference return None, so NO window is derived from that wall (warned).
-# The accepted spellings are deliberately generous (unit interval / unit / ratio / fraction /
-# dimensionless / 1 / - / empty, plus % / permil / ppm), and all 477 ratios in Alderaan use
-# "unit interval", so nothing is affected today. If we ever meet a file with an odd-but-clearly
-# dimensionless uom, the lenient alternative is: "unknown uom BUT the number is already in
-# 0..1 -> trust it" (a ratio is dimensionless by nature). Deliberately NOT done yet.
+#              surfaces/openings").
 # ============================================================================================
 def _checked_ratio(ratio, context):
-    """A window-to-wall ratio must be a real 0..1 fraction. Outside that range it is a DATA
-    ERROR (a wrong uom, a typo) — WARN, because synthesize_window would otherwise silently
-    clamp it to MAX_WINDOW_TO_WALL_RATIO and hand back a 95 %-glass wall."""
+    """A window-to-wall ratio must be a real fraction in [0,1]. Outside that it is a DATA ERROR
+    (a wrong uom, a typo): WARN and return None so NO window is synthesized — instead of letting
+    synthesize_window clamp, say, a 60x ratio down to MAX_WINDOW_TO_WALL_RATIO and hand back a
+    95%-glass wall that LOOKS like real data. Presence-based: a wall with no usable ratio simply
+    gets no window (never a fabricated one)."""
     if ratio is None:
         return None
     if ratio < 0.0 or ratio > 1.0:
-        warn(f"{context}: window-to-wall ratio {ratio} is outside 0..1 (wrong uom?)")
+        warn(f"{context}: window-to-wall ratio {ratio} is outside 0..1 (wrong uom?); no window")
+        return None
     return ratio
 
 ## LOD 2 superficial winodw check + logic for creation window 
@@ -169,9 +159,12 @@ def window_to_wall_ratio_from_attributes(doc, wall_element):
         "bdgBdrySurfOpeningToSurfaceRatio", stated_ratio, ratio_uom,
         context=f"wall '{wall_id}' bdgBdrySurfOpeningToSurfaceRatio")
     if ratio is not None:
-        ratio = _checked_ratio(ratio, f"wall '{wall_id}' bdgBdrySurfOpeningToSurfaceRatio")
-        return ratio, (f"citygml bdgBdrySurfOpeningToSurfaceRatio = {stated_ratio}"
-                       f"{(' ' + ratio_uom) if ratio_uom else ''} -> {round(ratio, 4)}")
+        checked = _checked_ratio(ratio, f"wall '{wall_id}' bdgBdrySurfOpeningToSurfaceRatio")
+        source = (f"bdgBdrySurfOpeningToSurfaceRatio = {stated_ratio}"
+                  f"{(' ' + ratio_uom) if ratio_uom else ''}")
+        if checked is None:                          # stated but out of 0..1 -> no window
+            return None, f"citygml {source} is outside 0..1; no window"
+        return checked, f"citygml {source} -> {round(checked, 4)}"
 
     raw_total, total_uom = _child_measure(doc, wall_element, "nrg", "bdgBdrySurfTotalSurfaceArea")
     raw_opaque, opaque_uom = _child_measure(doc, wall_element, "nrg", "bdgBdrySurfOpaqueSurfaceArea")
@@ -186,11 +179,13 @@ def window_to_wall_ratio_from_attributes(doc, wall_element):
             # to_reference already warned and named the offending unit.
             return None, (f"total ('{total_uom}') / opaque ('{opaque_uom}') areas are not in an "
                           f"accepted area unit; unusable")
-        ratio = _checked_ratio(max(0.0, (total_area - opaque_area) / total_area),
-                               f"wall '{wall_id}' (total - opaque) / total")
-        return ratio, (f"citygml (total {raw_total} {total_uom} - opaque {raw_opaque} "
-                       f"{opaque_uom}) -> ({total_area} - {opaque_area}) m2 / total "
-                       f"= {round(ratio, 3)}")
+        checked = _checked_ratio(max(0.0, (total_area - opaque_area) / total_area),
+                                 f"wall '{wall_id}' (total - opaque) / total")
+        source = (f"(total {raw_total} {total_uom} - opaque {raw_opaque} {opaque_uom}) "
+                  f"-> ({total_area} - {opaque_area}) m2 / total")
+        if checked is None:                          # opaque > total etc. -> unusable, no window
+            return None, f"citygml {source} is outside 0..1; no window"
+        return checked, f"citygml {source} = {round(checked, 3)}"
     return None, "no opening ratio or total/opaque areas on wall"
 
 # invent geometry It takes the wall polygon, finds its centre, and shrinks the wall's own shape toward that centre
@@ -219,7 +214,8 @@ def synthesize_window(wall_points, window_to_wall_ratio):
 
 
 def windows_for_wall(doc, wall_element, wall_points, origin_offset, window_constructions):
-    """ one exterior wall -> a list of Window objects (or [] = opaque)."""
+    """ one exterior wall -> a list of Window objects (or [] = opaque).
+"""
     windows_from_geometry = explicit_windows(doc, wall_element, wall_points, origin_offset,
                                              window_constructions)
     if windows_from_geometry:                                          

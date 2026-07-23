@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from ..citygml.xml_io import GML_ID, local_name, warn
 from .citygml_read import _child_measure, _child_text
-from .model import Material
+from .model import ABSENT, INVALID, OK, Material, trace
 from .units import MIN_SPECIFIC_HEAT, to_reference
 
 # ===== defaults =====
@@ -44,44 +44,44 @@ DEFAULT_SPECIFIC_HEAT = 900.0      # J/kg-K
 DEFAULT_THICKNESS = 0.10           # m
 DEFAULT_AIRGAP_RESISTANCE = 0.18   # m2-K/W  (ISO 6946 still-air gap)
 
+
+# this is a last resort which we dont have anything for material layers
 DEFAULT_MATERIAL = Material(name="DEFAULT_OPAQUE", eplus="Material",
                             thickness=DEFAULT_THICKNESS, conductivity=DEFAULT_CONDUCTIVITY,
                             density=DEFAULT_DENSITY, specific_heat=DEFAULT_SPECIFIC_HEAT,
                             roughness=DEFAULT_ROUGHNESS,
-                            provenance={"all": "project default (no CityGML material)"})
+                            provenance={"all": trace(ABSENT, "project default (no CityGML material)")})
 
 
 # ===== per-field resolution + provenance =====================================
-# Each field is resolved ONCE here: read the CityGML value, convert it to the E+ unit, and KEEP
-# it — falling back to the default only for the three reasons listed in the module docstring
-# (absent / unknown uom / a value EnergyPlus would reject). The returned provenance line is the
-# audit record for that one parameter (raw -> converted, or why defaulted), as ONE readable string.
+# The status vocabulary (ok / absent / invalid) + trace() live in model.py, shared by every
+# builder. See that module's header for what each status means.
 def _measure_note(raw, uom, value, unit):
-    """"citygml <raw> <uom> -> <value> <unit>" (uom omitted when absent)."""
-    return f"citygml {raw}{(' ' + uom) if uom else ''} -> {value} {unit}"
+    """The `ok` entry: "citygml <raw> <uom> -> <value> <unit>" (uom omitted when absent)."""
+    return trace(OK, f"citygml {raw}{(' ' + uom) if uom else ''} -> {value} {unit}")
 
 
 def _resolve_field(doc, mat_el, tag, default, unit, mat_name):
-    """(value, provenance) for one nrg:<tag> measure. Real value KEPT; DEFAULT when unusable.
+    """(value, trace) for one nrg:<tag> measure. Real value KEPT; DEFAULT when unusable.
 
-    "Unusable" is ONE idea with three causes, all ending in the same place — the default:
-      * the field is ABSENT;
-      * its `uom` is not one we accept, so `to_reference` returned None (we never guess a unit);
-      * it is <= 0, which EnergyPlus REJECTS (IDD `Material`: N1 Thickness, N2 Conductivity and
-        N3 Density are all `\\minimum> 0`) — writing it would just earn a Severe.
+    Reading `raw` FIRST is what makes the status unambiguous: once we know the element was
+    there, a None back from `to_reference` can only mean "we could not interpret it".
+    IDD `Material`: N1 Thickness, N2 Conductivity, N3 Density are all `\\minimum> 0`.
 
     `tag` IS the unit-table field name, so units.py needs no converter passed in.
     """
     raw, uom = _child_measure(doc, mat_el, "nrg", tag)
     if raw is None:
-        return default, f"default {default} {unit} ({tag} not in CityGML)"
+        return default, trace(ABSENT, f"{tag} not in CityGML -> default {default} {unit}")
     value = to_reference(tag, raw, uom, context=f"material '{mat_name}' {tag}")  # None = bad unit
     if value is None:
-        return default, f"default {default} {unit} ({tag} unit '{uom}' not recognised)"
+        return default, trace(INVALID, f"citygml {tag} {raw} '{uom}' unit not accepted "
+                                        f"-> default {default} {unit}")
     if value <= 0:
         warn(f"material '{mat_name}' {tag}: {value} {unit} is not allowed - EnergyPlus requires > 0; "
              f"using default {default}")
-        return default, f"default {default} {unit} (citygml {raw}{(' ' + uom) if uom else ''} is <= 0)"
+        return default, trace(INVALID, f"citygml {tag} {raw}{(' ' + uom) if uom else ''} -> {value} "
+                                        f"is <= 0 -> default {default} {unit}")
     return value, _measure_note(raw, uom, value, unit)
 
 
@@ -94,43 +94,54 @@ def _resolve_specific_heat(doc, mat_el, mat_name):
     realistic DEFAULT_SPECIFIC_HEAT rather than being clamped to 100."""
     raw, uom = _child_measure(doc, mat_el, "nrg", "specificHeatCapacity")
     if raw is None:
-        return DEFAULT_SPECIFIC_HEAT, (f"default {DEFAULT_SPECIFIC_HEAT} J/kg-K "
-                                       f"(specificHeatCapacity not in CityGML)")
+        return DEFAULT_SPECIFIC_HEAT, trace(
+            ABSENT, f"specificHeatCapacity not in CityGML -> default {DEFAULT_SPECIFIC_HEAT} J/kg-K")
     value = to_reference("specificHeatCapacity", raw, uom,
                          context=f"material '{mat_name}' specificHeatCapacity")
     if value is None:
-        return DEFAULT_SPECIFIC_HEAT, (f"default {DEFAULT_SPECIFIC_HEAT} J/kg-K "
-                                       f"(specificHeatCapacity unit '{uom}' not recognised)")
+        return DEFAULT_SPECIFIC_HEAT, trace(
+            INVALID, f"citygml specificHeatCapacity {raw} '{uom}' unit not accepted "
+                     f"-> default {DEFAULT_SPECIFIC_HEAT} J/kg-K")
     if value < MIN_SPECIFIC_HEAT:
         warn(f"material '{mat_name}' specificHeatCapacity: {value} J/kg-K is below the "
              f"EnergyPlus minimum ({MIN_SPECIFIC_HEAT}); using default {DEFAULT_SPECIFIC_HEAT}")
-        return DEFAULT_SPECIFIC_HEAT, (f"default {DEFAULT_SPECIFIC_HEAT} J/kg-K "
-                                       f"(citygml {raw} -> {value} is below the E+ minimum "
-                                       f"{MIN_SPECIFIC_HEAT})")
+        return DEFAULT_SPECIFIC_HEAT, trace(
+            INVALID, f"citygml specificHeatCapacity {raw} -> {value} is below the E+ minimum "
+                     f"{MIN_SPECIFIC_HEAT} -> default {DEFAULT_SPECIFIC_HEAT} J/kg-K")
     return value, _measure_note(raw, uom, value, "J/kg-K")
 
 
 def _resolve_thickness(thickness, raw=None, raw_uom=None, mat_name="material"):
-    """(value, provenance) for layer thickness. Same rule as _resolve_field: absent, unknown
-    unit (converter returned None), or <= 0 -> the default. EnergyPlus requires Thickness > 0
-    (IDD `Material` N1), and a stated 0 must WARN, not default in silence."""
-    if thickness is None:                       # absent, or its uom was not recognised
-        return DEFAULT_THICKNESS, f"default {DEFAULT_THICKNESS} m (thickness missing/unusable)"
+    """(value, trace) for layer thickness — same three outcomes as _resolve_field.
+
+    Thickness is read on the LAYER (not the material), so it arrives already converted. `raw`
+    is what distinguishes the two ways `thickness` can be None: absent (the layer never stated
+    it) vs invalid (it stated one we could not read). Without `raw` those collapse into one
+    message, which is what used to hide a lost value.
+    EnergyPlus requires Thickness > 0 (IDD `Material` N1)."""
+    if thickness is None:
+        if raw is None:
+            return DEFAULT_THICKNESS, trace(
+                ABSENT, f"thickness not in CityGML -> default {DEFAULT_THICKNESS} m")
+        return DEFAULT_THICKNESS, trace(
+            INVALID, f"citygml thickness {raw} '{raw_uom}' unit not accepted "
+                     f"-> default {DEFAULT_THICKNESS} m")
     if thickness <= 0:
         warn(f"layer of '{mat_name}': thickness {thickness} m is not allowed - EnergyPlus requires > 0; "
              f"using default {DEFAULT_THICKNESS}")
-        return DEFAULT_THICKNESS, (f"default {DEFAULT_THICKNESS} m "
-                                   f"(citygml {raw}{(' ' + raw_uom) if raw_uom else ''} is <= 0)")
+        return DEFAULT_THICKNESS, trace(
+            INVALID, f"citygml thickness {raw}{(' ' + raw_uom) if raw_uom else ''} -> {thickness} "
+                     f"is <= 0 -> default {DEFAULT_THICKNESS} m")
     return thickness, _measure_note(raw, raw_uom, thickness, "m")
 
-
+# this is default for layers like we have 3 layers but two got real data for the last one we use this (differnt from DEFAULT all at top)
 def _default_material_copy(name, reason):
     """A named copy of DEFAULT_MATERIAL, tagged with why the fallback fired."""
     return Material(name=name, eplus="Material",
                     thickness=DEFAULT_THICKNESS, conductivity=DEFAULT_CONDUCTIVITY,
                     density=DEFAULT_DENSITY, specific_heat=DEFAULT_SPECIFIC_HEAT,
                     roughness=DEFAULT_ROUGHNESS,
-                    provenance={"all": f"project default ({reason})"})
+                    provenance={"all": trace(ABSENT, f"project default material ({reason})")})
 
 
 # ===== material builders (one of the 3 E+ objects) ===========================
@@ -161,29 +172,53 @@ def _solid_material(doc, mat_el, name, thickness, thickness_raw=None, thickness_
 
 
 def _airgap_material(doc, mat_el, name, thickness, thickness_raw=None, thickness_uom=None):
-    """CityGML nrg:Gas -> E+ Material:AirGap. The real nrg:rValue (thermal resistance,
-    m2-K/W) is kept; it defaults to 0.18 (ISO 6946 still-air gap) when missing/unusable.
-    gas_type (nrg:type) is recorded for the trace only (E+ AirGap has no gas field)."""
+    """CityGML nrg:Gas -> E+ Material:AirGap. The real nrg:rValue (m2-K/W) is kept.
+
+    The XSD gives GasType exactly two own elements: `isVentilated` (boolean, `default="false"`)
+    and `rValue` (MeasureType) — plus `libraryCode`, which we deliberately do not read. There is
+    NO `nrg3:type` on a Gas, so the old `gas_type` (which always came out "Air" because the
+    lookup never matched anything) is gone: it recorded a constant dressed up as file data.
+
+    isVentilated MATTERS: DEFAULT_AIRGAP_RESISTANCE is an UNVENTILATED-cavity figure, so it
+    cannot stand in for a ventilated gap — a ventilated cavity is a different calculation
+    entirely, and a boolean cannot say how ventilated. Because the XSD declares
+    `default="false"`, an ABSENT isVentilated legitimately means "not ventilated": that is the
+    schema speaking, not us guessing.
+
+    The three `thickness*` arguments are accepted but DELIBERATELY UNUSED — they only keep this
+    builder interchangeable with `_solid_material` so `_material_from_citygml` can dispatch to
+    either. IDD `Material:AirGap` has exactly TWO fields, A1 Name and N1 Thermal Resistance
+    (`\\minimum> 0`): no Thickness and no Roughness, because a gap's geometry is already baked
+    into its R-value. (Thickness is N1 of the FULL `Material` only; `Material:NoMass` has no
+    thickness either, just A2 Roughness + N1 Thermal Resistance.)"""
     raw, uom = _child_measure(doc, mat_el, "nrg", "rValue")
-    gas_type = _child_text(doc, mat_el, "nrg", "type") or "Air"
-    # SAME RULE AS EVERY OTHER MEASURE: units.py converts it, or returns None when it cannot,
-    # and the default fires for absent / unknown-unit / <= 0 (IDD Material:AirGap N1: `minimum> 0`).
+    ventilated = (_child_text(doc, mat_el, "nrg", "isVentilated") or "false").lower() == "true"
     r_value = to_reference("rValue", raw, uom, context=f"gas material '{name}' rValue")
-    if r_value is not None and r_value > 0:
-        r_note = _measure_note(raw, uom, r_value, "m2-K/W")
-    elif r_value is None and raw is not None:
-        # the converter ALREADY warned about the unrecognised unit — do not say it twice
-        r_note = (f"default {DEFAULT_AIRGAP_RESISTANCE} m2-K/W "
-                  f"(rValue unit '{uom}' is not m2-K/W)")
+
+    if r_value is not None and r_value > 0:                 # the file gave a usable R — trust it
+        resistance_trace = _measure_note(raw, uom, r_value, "m2-K/W")
+    elif raw is not None:                                   # stated, but we cannot use it
+        why = (f"unit '{uom}' not accepted" if r_value is None
+               else f"-> {r_value} is <= 0 (IDD Material:AirGap N1 requires > 0)")
+        warn(f"gas material '{name}': rValue {raw} {why}; "
+             f"using default {DEFAULT_AIRGAP_RESISTANCE} m2-K/W")
         r_value = DEFAULT_AIRGAP_RESISTANCE
-    else:
-        reason = ("rValue not provided by CityGML" if raw is None
-                  else f"rValue {raw} is <= 0 (EnergyPlus requires > 0)")
-        warn(f"gas material '{name}': {reason}; using ISO 6946 default {DEFAULT_AIRGAP_RESISTANCE}")
+        resistance_trace = trace(INVALID, f"citygml rValue {raw} {why} "
+                                          f"-> default {DEFAULT_AIRGAP_RESISTANCE} m2-K/W")
+    elif ventilated:                                        # absent, and the default cannot apply
+        warn(f"gas material '{name}': no rValue and nrg3:isVentilated=true — "
+             f"{DEFAULT_AIRGAP_RESISTANCE} m2-K/W is an UNVENTILATED-cavity value and does not "
+             f"describe a ventilated gap; using it anyway for lack of any stated resistance")
         r_value = DEFAULT_AIRGAP_RESISTANCE
-        r_note = f"default {DEFAULT_AIRGAP_RESISTANCE} m2-K/W ({reason})"
+        resistance_trace = trace(INVALID, f"no rValue and isVentilated=true; the unventilated "
+                                          f"default {DEFAULT_AIRGAP_RESISTANCE} m2-K/W does not "
+                                          f"apply to a ventilated cavity")
+    else:                                                   # absent, unventilated -> the default fits
+        r_value = DEFAULT_AIRGAP_RESISTANCE
+        resistance_trace = trace(ABSENT, f"rValue not in CityGML; isVentilated=false -> "
+                                         f"unventilated default {DEFAULT_AIRGAP_RESISTANCE} m2-K/W")
     return Material(name=name, eplus="Material:AirGap", thermal_resistance=r_value,
-                    provenance={"thermal_resistance": r_note, "gas_type": gas_type})
+                    provenance={"thermal_resistance": resistance_trace})
 
 
 def _material_from_citygml(doc, mat_el, thickness, layer_el=None, thickness_raw=None, thickness_uom=None):
@@ -196,4 +231,4 @@ def _material_from_citygml(doc, mat_el, thickness, layer_el=None, thickness_raw=
         return _default_material_copy(name, "no material referenced by the layer")
     if local_name(mat_el) == "Gas":
         return _airgap_material(doc, mat_el, name, thickness, thickness_raw, thickness_uom)
-    return _solid_material(doc, mat_el, name, thickness, thickness_raw, thickness_uom)
+    return _solid_material(doc, mat_el, name, thickness, thickness_raw, thickness_uom) 

@@ -11,11 +11,21 @@ Split out of constructions.py; shared by materials.py and constructions.py.
 
 from __future__ import annotations
 
-from .units import _num
+import math
 
 
+def _num(v, default=None):
+    """Coerce v to float; blank/NaN/unparseable -> default. (Text->number, not unit conversion,
+    so it lives here with the other GML readers, not in units.py.)"""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
 
-def _child_text(doc, parent, prefix, local):
+
+def _child_text(doc, parent, prefix, local): # read value without uom
     """First child's stripped text, or None."""
     if parent is None:
         return None
@@ -23,7 +33,7 @@ def _child_text(doc, parent, prefix, local):
     return els[0].text.strip() if els and els[0].text and els[0].text.strip() else None
 
 
-def _child_measure(doc, parent, prefix, local):
+def _child_measure(doc, parent, prefix, local): # read value with Uom
     """Return (numeric value, uom) for a gml:MeasureType-like child."""
     if parent is None:
         return None, None

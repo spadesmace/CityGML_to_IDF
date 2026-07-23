@@ -1,10 +1,19 @@
 """
 the ARCHETYPE fallback tier  in the CityGML, the building
-is looked up in an archetype table keyed by its TYPE — function + construction year +
+is looked up in an archetype table keyed by its TYPE — function = residential + construction year +
 construction weight (TABULA / UBEM-CARDs style) — to get a per-surface-type U-value.
 
-the KEY mapping (which CityGML fields carry function / year /
-weight: bldg:function, bldg:yearOfConstruction, nrg3:bdgConstructionWeight)  ?
+NOTE map could be :  ( need to check what available)
+from bldg:Building 
+bldg:yearOfConstruction
+parse this order
+bldg:function
+bldg:usage
+bldg:class = “residentail”
+bldg:storysAboveGround
+
+define @dataclass
+class ArchetypeInput:
 """
 
 from __future__ import annotations
@@ -23,7 +32,7 @@ ARCHETYPES_JSON = os.path.join(_PKG, "input", "archetypes.json")
 def load_archetypes(path=ARCHETYPES_JSON):
     """Read the archetype JSON into a plain {key: {param: value}} dict.
 
-    Keys beginning with '_' are documentation (e.g. `_README`) and are dropped. A
+    Keys beginning with '_' are documentation (e.g. `A`) and are dropped. A
     missing / empty / broken file returns {} (the tier stays inert), warned once.
     """
     try:
@@ -49,14 +58,3 @@ def lookup(table, key):
     return table.get(key) or table.get("default")
 
 
-def _demo(path=ARCHETYPES_JSON):
-    table = load_archetypes(path)
-    print(f"{len(table)} archetype row(s) in {path}")
-    for key, value in list(table.items())[:10]:
-        print(f"  {key}: {value}")
-    if not table:
-        print("  (empty placeholder — archetype tier is inert; raw converter is live)")
-
-
-if __name__ == "__main__":
-    _demo(sys.argv[1] if len(sys.argv) > 1 else ARCHETYPES_JSON)

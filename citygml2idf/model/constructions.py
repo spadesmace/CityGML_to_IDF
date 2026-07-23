@@ -7,15 +7,14 @@ readability and live next door:
     citygml_read.py — typed GML child readers (_child_text / _child_measure)
                       (the property/xlink resolver is doc.property_object() in xml_io.py)
     materials.py    — the 3 EnergyPlus material builders + DEFAULT_MATERIAL
-     # TODO archetypes.py   — the EXTERNAL archetype fallback (swappable JSON) — DEFERRED, unwired
+     # TODO archetypes.py   — the EXTERNAL archetype fallback (swappable JSON)  must add
 
 HOW A CONSTRUCTION AND ITS MATERIALS FIND EACH OTHER (Energy ADE 3.0):
   The link (construction -> layer -> material) is by gml:id ONLY — inline nesting OR
   xlink:href. We do NOT read
   `libraryCode`/`codeSpace`: on real data that catalogue key resolved nothing (every
   surface xlinks straight to its construction, which already carries its layers or a
-  uValue), and the future archetype fallback is keyed by building function/year/weight,
-  NOT by libraryCode. Constructions are NAMED by their gml:id.
+  uValue).
 
 Same construction on many surfaces is resolved ONCE (dedup in resolve_all)
 """
@@ -29,11 +28,10 @@ from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, local_name, warn
 from .citygml_read import _child_measure, _child_text
 from .materials import DEFAULT_MATERIAL, DEFAULT_ROUGHNESS, _material_from_citygml
-from .model import Construction, Material, WindowConstruction
+from .model import ABSENT, INVALID, OK, Construction, Material, WindowConstruction, trace
 from .units import MIN_NOMASS_RESISTANCE, to_reference
 
 DEFAULT_NAME = "DEFAULT_CONSTRUCTION"
-ADE_LAYER_ORDER = "inside_to_outside" # writtenin ADE specifcation (segment : 3.8 The Layered construction module)
 
 
 # ===== construction builders ================================================
@@ -92,16 +90,16 @@ def _from_citygml(doc, constr_el, materials):
 
     layers = []
     # Each layer is inline inside LayeredConstruction, and its material is by XLink.
-    for layer_prop in doc.children(constr_el, "nrg", "layer"):
-        layer = doc.property_object(layer_prop)
+    for layer_prop in doc.children(constr_el, "nrg", "layer"): # find <layer> wrapper
+        layer = doc.property_object(layer_prop) # open <Layer> object 
         if layer is None:
             warn(f"construction '{constr_el.get(GML_ID)}': empty layer property skipped")
             continue
         thickness_value, thickness_uom = _child_measure(doc, layer, "nrg", "thickness")
         thickness = to_reference("thickness", thickness_value, thickness_uom,
                                  context=f"layer '{layer.get(GML_ID)}' thickness")
-        mat_prop = doc.children(layer, "nrg", "material")
-        mat_el = doc.property_object(mat_prop[0]) if mat_prop else None
+        mat_prop = doc.children(layer, "nrg", "material") # FIND the <material> wrapper
+        mat_el = doc.property_object(mat_prop[0]) if mat_prop else None # OPEN → <SolidMaterial> (via xlink)
         m = _material_from_citygml(doc, mat_el, thickness, layer,
                                    thickness_raw=thickness_value, thickness_uom=thickness_uom)
         materials.setdefault(m.name, m)
@@ -127,15 +125,14 @@ def _from_citygml(doc, constr_el, materials):
                  f"unusable (wrong uom?), using the default construction")
         else:
             mat_name = constr_el.get(GML_ID) or "citygml_construction"
+            u_text = f"citygml uValue {u_raw}{(' ' + u_uom) if u_uom else ''}"
             materials.setdefault(mat_name, Material(
                 name=mat_name, eplus="Material:NoMass",
                 roughness=DEFAULT_ROUGHNESS, thermal_resistance=thermal_resistance,
                 provenance={"thermal_resistance":
-                            f"citygml uValue {u_raw}{(' ' + u_uom) if u_uom else ''} "
-                            f"-> R = 1/U = {thermal_resistance} m2-K/W"}))
+                            trace(OK, f"{u_text} -> R = 1/U = {thermal_resistance} m2-K/W")}))
             return Construction(name="", layers=[mat_name], source="citygml_uvalue",
-                                provenance={"u_value": f"citygml uValue {u_raw}"
-                                            f"{(' ' + u_uom) if u_uom else ''} -> {u_value} W/m2-K"})
+                                provenance={"u_value": trace(OK, f"{u_text} -> {u_value} W/m2-K")})
 
     warn(f"construction '{constr_el.get(GML_ID)}': no layers or uValue; using default")
     return Construction(name="", source="citygml")
@@ -153,22 +150,24 @@ def _from_citygml(doc, constr_el, materials):
 
 DEFAULT_GLAZING_U = 2.8       # W/m2-K
 DEFAULT_GLAZING_SHGC = 0.7
-_GLAZING_EPS = 1e-4 #  SHGC/VT clamped into the OPEN (0,1) interval (IDD requires >0 and <1).
+def _valid_fraction(value, context):
+    """A glazing fraction (SHGC / visible transmittance) is usable only if it is ALREADY inside
+    the open interval (0,1) — IDD WindowMaterial:SimpleGlazingSystem N2/N3 require > 0 and < 1.
 
+    A value OUTSIDE that is a DATA ERROR (an odd/ignored uom, a typo): we WARN and return None
+    so the caller falls to its honest default. We do NOT clamp it into range — clamping 60 to
+    0.9999 turns a loud error into a quiet wrong number that LOOKS like real data.
 
-def _clamp_open_unit(value, context="fraction"):
-    """Force a fraction strictly inside (0,1) — the IDD requires SHGC/VT >0 and <1
-    (WindowMaterial:SimpleGlazingSystem N2/N3: `minimum> 0`, `maximum< 1`).
-
-    A value that lands OUTSIDE 0..1 is a DATA ERROR (an ignored/odd uom, a typo), not
-    something to squash in silence: a bare clamp is exactly what turns a loud error into a
-    quiet wrong number. So we WARN whenever the clamp actually has to bite."""
+    An already-None input (absent, or a uom units.py rejected) returns None silently — the
+    converter already warned, and 'absent' is not an error."""
     if value is None:
         return None
     value = float(value)
-    if value < 0.0 or value > 1.0:
-        warn(f"{context}: value {value} is outside 0..1 (wrong uom?); clamped into (0,1)")
-    return min(1.0 - _GLAZING_EPS, max(_GLAZING_EPS, value))
+    if 0.0 < value < 1.0:
+        return value
+    warn(f"{context}: value {value} is outside the open interval (0,1) (wrong uom?); "
+         f"not usable, using the default")
+    return None
 
 
 def _glazing_transmittances(doc, constr_el, name="glazing"):
@@ -206,73 +205,58 @@ def _first_fraction(bands, wavelength):
 
 
 def _glazing_from_citygml(doc, constr_el, name):
-    """ build a SIMPLE glazing (kind='glazing': u_factor, shgc, visible_transmittance)
-    from a LayeredConstruction's uValue / gValue / transmittance. Real CityGML value first,
-    default LAST; visible transmittance is OMITTED (None) when absent. Per-field trace."""
-    trace = {}
+    """Build a SIMPLE glazing (u_factor, shgc, visible_transmittance) from a LayeredConstruction's
+    uValue / gValue / transmittance. Real CityGML value first, default LAST; visible transmittance
+    is OMITTED when absent/unusable. Each field carries a {status, note} provenance entry."""
+    prov = {}
 
     # --- u_factor : nrg3:uValue -> default ---
     u_raw, u_uom = _child_measure(doc, constr_el, "nrg", "uValue")
     u_value = to_reference("uValue", u_raw, u_uom, context=f"glazing '{name}' uValue")
     if u_value and u_value > 0:
         u_factor = u_value
-        trace["u_factor"] = {"raw": u_raw, "raw_uom": u_uom or None, "value": u_factor,
-                             "unit": "W/m2-K", "source": "citygml_uValue"}
+        prov["u_factor"] = trace(OK, f"citygml uValue {u_raw}{(' ' + u_uom) if u_uom else ''} "
+                                     f"-> {u_factor} W/m2-K")
     else:
         u_factor = DEFAULT_GLAZING_U
-        trace["u_factor"] = {"raw": u_raw, "value": u_factor, "unit": "W/m2-K",
-                             "source": "default", "reason": "no usable nrg3:uValue"}
+        prov["u_factor"] = trace(ABSENT if u_raw is None else INVALID,
+                                 f"no usable uValue -> default {DEFAULT_GLAZING_U} W/m2-K")
 
     bands = _glazing_transmittances(doc, constr_el, name)   # already converted to 0..1
 
     # --- shgc : nrg3:gValue -> FIRST solar transmittance -> default ---
-    # gValue is a gml:ScaleType, so its uom is REQUIRED and may legally be a percent:
-    # convert it before anything else looks at the number.
     g_raw, g_uom = _child_measure(doc, constr_el, "nrg", "gValue")
     g_value = to_reference("gValue", g_raw, g_uom, context=f"glazing '{name}' gValue")
-    if g_value is not None:
-        shgc = _clamp_open_unit(g_value, context=f"glazing '{name}' gValue")
-        trace["shgc"] = {"raw": g_raw, "raw_uom": g_uom or None, "value": shgc,
-                         "unit": "fraction", "source": "citygml_gValue"}
+    shgc = _valid_fraction(g_value, f"glazing '{name}' gValue")   # None if absent OR out of range
+    if shgc is not None:
+        prov["shgc"] = trace(OK, f"citygml gValue {g_raw}{(' ' + g_uom) if g_uom else ''} -> SHGC {shgc}")
     else:
         solar, n_solar = _first_fraction(bands, "solar")
-        if solar is not None:
+        solar_shgc = _valid_fraction(solar, f"glazing '{name}' solar transmittance")
+        if solar_shgc is not None:
             if n_solar > 1:
                 warn(f"glazing '{name}': {n_solar} solar transmittances; using the first ({solar})")
-            shgc = _clamp_open_unit(solar, context=f"glazing '{name}' solar transmittance")
-            trace["shgc"] = {"raw": solar, "value": shgc, "unit": "fraction",
-                             "source": "citygml_solar_transmittance",
-                             "approximation": "SHGC >= solar transmittance (lower bound)",
-                             "solar_transmittance_count": n_solar}
+            shgc = solar_shgc
+            prov["shgc"] = trace(OK, f"solar transmittance {solar} -> SHGC {shgc} (lower-bound approximation)")
         else:
             shgc = DEFAULT_GLAZING_SHGC
-            trace["shgc"] = {"value": shgc, "unit": "fraction", "source": "default",
-                             "reason": "no nrg3:gValue and no solar nrg3:transmittance"}
+            had_source = g_raw is not None or solar is not None   # present but unusable = invalid
+            prov["shgc"] = trace(INVALID if had_source else ABSENT,
+                                 f"no usable gValue or solar transmittance -> default {DEFAULT_GLAZING_SHGC}")
 
-    # --- visible transmittance : FIRST visible transmittance -> OMIT (None) ---
+    # --- visible transmittance : FIRST visible transmittance -> OMIT when absent/unusable ---
     visible, _n_visible = _first_fraction(bands, "visible")
-    if visible is not None:
-        visible_transmittance = _clamp_open_unit(
-            visible, context=f"glazing '{name}' visible transmittance")
-        trace["visible_transmittance"] = {"raw": visible, "value": visible_transmittance,
-                                          "unit": "fraction",
-                                          "source": "citygml_visible_transmittance"}
+    visible_transmittance = _valid_fraction(visible, f"glazing '{name}' visible transmittance")
+    if visible_transmittance is not None:
+        prov["visible_transmittance"] = trace(OK, f"citygml visible transmittance {visible} "
+                                                  f"-> {visible_transmittance}")
     else:
-        visible_transmittance = None # omitted when absent
-        trace["visible_transmittance"] = {"value": None, "source": "omitted",
-                                          "reason": "no visible nrg3:transmittance (E+ N3 optional)"}
+        prov["visible_transmittance"] = trace(INVALID if visible is not None else ABSENT,
+                                              "no usable visible transmittance; omitted (E+ N3 optional)")
 
-    return {"name": name, "kind": "glazing", "u_factor": u_factor, "shgc": shgc,
-            "visible_transmittance": visible_transmittance,
-            "source": "citygml_glazing", "trace": trace}
+    return {"name": name, "u_factor": u_factor, "shgc": shgc,
+            "visible_transmittance": visible_transmittance, "provenance": prov}
 
-
-def _glazing_provenance_line(glazing):
-    """One readable line summarising a glazing's u_factor/shgc/visible sources (from the
-    per-field trace) for WindowConstruction.provenance."""
-    trace = glazing["trace"]
-    return {field: f"{trace[field].get('value')} <- {trace[field].get('source')}"
-            for field in ("u_factor", "shgc", "visible_transmittance") if field in trace}
 
 def window_glazing(doc, window_el):
     """A bldg:Window's glazing (WindowConstruction) from its OWN nrg3:layeredConstruction,
@@ -287,13 +271,14 @@ def window_glazing(doc, window_el):
     return WindowConstruction(name=glazing["name"],
                               u_factor=glazing["u_factor"], shgc=glazing["shgc"],
                               visible_transmittance=glazing["visible_transmittance"],
-                              provenance=_glazing_provenance_line(glazing))
+                              provenance=glazing["provenance"])
 
 
 # ===== construction owner cascade ============================================
 # Read layeredConstruction only from schema-valid CityObject owners.
-# This covers BoundarySurface, ThermalZone, BuildingPart, Building; it rejects
-# raw gml:Polygon faces from LoD1 solids.
+# This covers BoundarySurface, ThermalZone and Building; it rejects raw gml:Polygon faces from
+# LoD1 solids. (bldg:BuildingPart is OUT OF SCOPE — one bldg:Building = one IDF — so it never
+# appears in the cascade; see semantics/building_surfaces.py.)
 def _construction_element(doc, owner_el):
     """A CityObject owner's LayeredConstruction (inline or via xlink), or None."""
     if owner_el is None:
@@ -308,10 +293,10 @@ def _construction_element(doc, owner_el):
 
 
 # Construction owner cascade:
-# LoD2/3 BoundarySurface first; then LoD1/whole-object context such as
-# ThermalZone, BuildingPart, Building.
+# LoD2/3 BoundarySurface first; then the LoD1/whole-object context (ThermalZone, Building),
+# which arrives as `context_ids` from semantics/building_surfaces._fallback_context_ids.
 def _construction_candidates(doc, surf_el, context_ids=None):
-    """"Construction owner cascade: BoundarySurface -> ThermalZone -> BuildingPart -> Building"""
+    """Construction owner cascade: BoundarySurface -> ThermalZone -> Building."""
     candidates = []
     seen = set()
 
@@ -343,11 +328,7 @@ def _construction_candidates(doc, surf_el, context_ids=None):
 #           building, almost always a wrong uom), the uValue is DISCARDED and the construction
 #           falls through to Tier 4. We never invent a replacement R.
 #   TIER 4  DEFAULT construction    — nothing usable in the CityGML.
-# TIER 3 (the EXTERNAL archetype fallback, keyed by building function/year/weight) is
-# DEFERRED to the end of the project and lives in model/archetypes.py (a swappable JSON,
-# NOT Excel). It is NOT wired here: the professor asked for the raw converter first, and
-# raw CityGML data always beats an archetype, so it would only ever slot in BETWEEN Tier
-# 2 and Tier 4. No libraryCode/codeSpace lookup — link is by gml:id only (like the prof).
+#   TIER 3 (the EXTERNAL archetype fallback, keyed by building function/year/weight) 
 def _resolve_surface(doc, surf_el, surface_record, materials):
     """Return (construction_name, Construction) for ONE surface.
 
@@ -390,7 +371,9 @@ def _construction_provenance_line(resolved):
     if resolved.source == "default":
         return ("default construction — no CityGML detailed layers (T1) or uValue (T2); "
                 "archetype (T3) deferred")
-    line = resolved.source                                  # citygml_layers | citygml_uvalue | reversed
+    # A ReverseLayeredConstruction INHERITS its base's source, so it reads citygml_layers /
+    # citygml_uvalue here too — the reversal itself is recorded in provenance["layer_order"].
+    line = resolved.source                                  # citygml_layers | citygml_uvalue
     if resolved.name:
         line += f" from construction '{resolved.name}'"     # named by its gml:id
     if resolved.source_context_id:
@@ -402,7 +385,7 @@ def resolve_all(doc, middle):
     """Resolve every surface in the middle layer; fill middle['constructions'] and
     middle['materials'] (deduped) and tag each surface with its construction name.
     Constructions and materials are found by gml:id (inline or xlink) only — no
-    libraryCode/codeSpace lookup (like the reference repo)."""
+    libraryCode/codeSpace lookup """
     constructions, materials = {}, {}
     for b in middle.buildings:
         for s in b.surfaces:

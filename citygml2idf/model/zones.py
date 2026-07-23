@@ -65,7 +65,7 @@ def thermal_zones(doc, building_element):
     if building_element is None:
         return []
     zone_properties = doc.children(building_element, "nrg", "thermalZone")
-    zones = [doc.property_object(prop) for prop in zone_properties]
+    zones = [doc.property_object(prop) for prop in zone_properties] # <thermalZone>
     return [zone for zone in zones if zone is not None]
 
 
@@ -108,7 +108,8 @@ def boundary_surface_ids(doc, zone_element):
     # REF : the zone<->surface link, ADE spec §4.3.2; golden rule (trust explicit xlinks).
     surface_ids = []
     for boundary_property in doc.children(zone_element, "nrg", "thermalBoundary"):
-        boundary_surface = doc.property_object(boundary_property)
+        boundary_surface = doc.property_object(boundary_property)   # <thermalBoundary> -> <WallSurface>...
+
         if boundary_surface is not None and boundary_surface.get(GML_ID):
             surface_ids.append(boundary_surface.get(GML_ID))
     return surface_ids
