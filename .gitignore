@@ -4,9 +4,6 @@ __pycache__/
 
 # Generated EnergyPlus / parser outputs
 citygml2idf/output/
-citygml2idf/output2/
-citygml2idf/output3/
-citygml2idf/test_outputs/
 
 # Local EnergyPlus and FMU installations are kept outside Git.
 citygml2idf/templates/EnergyPlus-*/
@@ -35,5 +32,7 @@ citygml2idf/templates/EnergyPlusToFMU/
 
 # Local-only runner + template data (EnergyPlus/FMU software is not in the repo).
 # Only Energy+.idd stays tracked in templates/.
+# compare with sqlite is also ignored (local)
 citygml2idf/run_energyplus.py
 citygml2idf/templates/*.json
+citygml2idf/compare.py  

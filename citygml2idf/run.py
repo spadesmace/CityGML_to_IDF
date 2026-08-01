@@ -110,10 +110,10 @@ if __name__ == "__main__":
 """
 how to run : 
 1- test one zone sample : 
-python -m citygml2idf.run citygml2idf\input\cases\case6.1_lod3_1zone_hull_win_SpecificationADE.gml
+python -m citygml2idf.run citygml2idf/input/cases/case6.1_lod3_1zone_hull_win_SpecificationADE.gml
 
 2- test two zones sample (for detailed and fast):
- FAST :  python -m citygml2idf.run citygml2idf\input\cases\case3.1_lod2_2zone_nowin_synth.gml
- DETAILED : python -m citygml2idf.run --detailed-interior citygml2idf\input\cases\case3.1_lod2_2zone_nowin_synth.gml
+ FAST :  python -m citygml2idf.run citygml2idf/input/cases/case3.1_lod2_2zone_nowin_synth.gml
+ DETAILED : python -m citygml2idf.run --detailed-interior citygml2idf/input/cases/case3.1_lod2_2zone_nowin_synth.gml
 
 """

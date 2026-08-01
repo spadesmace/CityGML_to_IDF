@@ -37,9 +37,21 @@ def new_empty_idf():
     idf.newidfobject("VERSION", Version_Identifier="23.1")
     idf.newidfobject("TIMESTEP", Number_of_Timesteps_per_Hour=4)
     idf.newidfobject("BUILDING", Name="Building", North_Axis=0.0, Terrain="City",
+                     # FullExterior: all beam solar entering a zone lands on the FLOOR.
+                     # FullInteriorAndExterior would ray-trace it onto each surface, but the IDD
+                     # requires a CONVEX zone and EnergyPlus does not check — a non-convex CityGML
+                     # building (L-footprint, gabled volume) would be mis-lit in silence.
                      Solar_Distribution="FullExterior",
+                     # Warmup stops when the zone temperature changes by less than this between
+                     # consecutive warmup days. In a FREE-FLOAT run that temperature IS the result,
+                     # so the IDD default of 0.4 K would land straight in the answer.
+                     Temperature_Convergence_Tolerance_Value=0.2,
                      # Heavier material layers can need more warmup days to converge.
                      Maximum_Number_of_Warmup_Days=50, Minimum_Number_of_Warmup_Days=6)
+    # E+ defaults, written explicitly so the model stays pinned if a future version changes them.
+    idf.newidfobject("HEATBALANCEALGORITHM", Algorithm="ConductionTransferFunction")
+    idf.newidfobject("SURFACECONVECTIONALGORITHM:INSIDE", Algorithm="TARP")
+    idf.newidfobject("SURFACECONVECTIONALGORITHM:OUTSIDE", Algorithm="DOE-2")
     idf.newidfobject("GLOBALGEOMETRYRULES", Starting_Vertex_Position="UpperLeftCorner",
                      Vertex_Entry_Direction="Counterclockwise", Coordinate_System="World")
     idf.newidfobject("SIMULATIONCONTROL",
@@ -62,26 +74,47 @@ def new_empty_idf():
 
     # Fixed ground temperatures for surfaces with the Ground boundary condition.
     # EnergyPlus defaults these fields to 18 C; writing them explicitly suppresses warnings.
+    #  NOTE KNOWN BIAS: 18 C comes from the IDD rule "2 C below average indoor temperature", written for
+    # CONDITIONED buildings whose heating warms the soil. A free-float building does not.
     gt = idf.newidfobject("SITE:GROUNDTEMPERATURE:BUILDINGSURFACE")
     for month in ("January", "February", "March", "April", "May", "June", "July",
                   "August", "September", "October", "November", "December"):
-        setattr(gt, f"{month}_Ground_Temperature", 18.0)
-
+        setattr(gt, f"{month}_Ground_Temperature", 15.0)
+        
+    # ================= OUTPUTS ======= (uncomment what you wnat)
     # Geometry and result reports.
-    idf.newidfobject("OUTPUT:SURFACES:DRAWING", Report_Type="DXF",
-                     Report_Specifications_1="Triangulate3DFace")
+    #idf.newidfobject("OUTPUT:SURFACES:DRAWING", Report_Type="DXF",Report_Specifications_1="Triangulate3DFace")  #  →  eplusout.dxf     3D geometry picture
+    
     idf.newidfobject("OUTPUT:SURFACES:LIST", Report_Type="DetailsWithVertices") # per-surface area/azimuth/tilt/boundary — confirms geometry & the Adiabatic/Surface decision (epluseout.eio)
     idf.newidfobject("OUTPUT:DIAGNOSTICS", Key_1="DisplayExtraWarnings")     # The full warning/Severe/Fatal list  (eplusout.err)
-    idf.newidfobject("OUTPUTCONTROL:TABLE:STYLE", Column_Separator="HTML")
-    idf.newidfobject("OUTPUT:TABLE:SUMMARYREPORTS", Report_1_Name="AllSummary")     # Envelope Summary, zone areas — the human-readable audit  (eplustbl.htm)
-    idf.newidfobject("OUTPUT:VARIABLEDICTIONARY", Key_Field="IDF")              # every variable name available for this model  (eplusout.rdd)
+    #idf.newidfobject("OUTPUTCONTROL:TABLE:STYLE", Column_Separator="HTML")
+    
+    # eplusout.sql — the hourly results in a queryable form (python stdlib `sqlite3`, no extra
+    # dependency)
+    idf.newidfobject("OUTPUT:SQLITE", Option_Type="SimpleAndTabular")
+    #idf.newidfobject("OUTPUT:TABLE:SUMMARYREPORTS", Report_1_Name="AllSummary")# Envelope Summary, zone areas — the human-readable audit  (eplustbl.htm)
+    
+    idf.newidfobject("OUTPUT:VARIABLEDICTIONARY", Key_Field="IDF")# every variable name available for this model  (eplusout.rdd)
+    
+    # eplusout.eso  (output:vairable)
     idf.newidfobject("OUTPUT:VARIABLE", Key_Value="*",
                      Variable_Name="Zone Mean Air Temperature", Reporting_Frequency="Hourly")
     # Zone Operative Temperature = 0.5*air + 0.5*mean-radiant: the free-float comfort result.
     idf.newidfobject("OUTPUT:VARIABLE", Key_Value="*",
                      Variable_Name="Zone Operative Temperature", Reporting_Frequency="Hourly")
+    # The other half of operative temperature — tells us whether a swing is air- or mass-driven.
+    idf.newidfobject("OUTPUT:VARIABLE", Key_Value="*",
+                     Variable_Name="Zone Mean Radiant Temperature", Reporting_Frequency="Hourly")
     idf.newidfobject("OUTPUT:VARIABLE", Key_Value="*",
                      Variable_Name="Site Outdoor Air Drybulb Temperature", Reporting_Frequency="Hourly")
+    # Both read 0 when the feature is absent, and that zero IS the evidence: 0 W of transmitted
+    # solar proves a window-less run really has no glazing.
+    idf.newidfobject("OUTPUT:VARIABLE", Key_Value="*",
+                     Variable_Name="Zone Windows Total Transmitted Solar Radiation Rate",
+                     Reporting_Frequency="Hourly")
+    idf.newidfobject("OUTPUT:VARIABLE", Key_Value="*",
+                     Variable_Name="Zone Total Internal Total Heating Rate",
+                     Reporting_Frequency="Hourly")
     idf.newidfobject("OUTPUT:VARIABLE", Key_Value="*",
                      Variable_Name="Surface Inside Face Temperature", Reporting_Frequency="Hourly")
     idf.newidfobject("OUTPUT:VARIABLE", Key_Value="*",
@@ -161,6 +194,44 @@ def add_building(idf, building):
             **_vertex_fields(surface.points))
 
 
+def add_infiltration(idf, building):
+    """One ZoneInfiltration:DesignFlowRate per zone that STATES an air change rate.
+
+    Infiltration = outdoor air leaking in through the fabric. In a free-float run it is the
+    direct air-to-air link to outdoors, so a zone without it floats like a thermos flask.
+
+    PRESENCE-BASED: a zone whose file gave no nrg3:infiltrationRate gets no object (zones.py
+    already warned). The infiltration Output:Variables are requested only when at least one
+    object exists — E+ warns about a variable it cannot produce, and that would pollute the
+    clean-.err gate on every windowless/sealed run.
+
+    IDD ZoneInfiltration:DesignFlowRate —
+      A3 Schedule Name  left BLANK: "If blank, defaults to always 1.0", so a constant rate
+                        needs no Schedule objects at all.
+      A4 AirChanges/Hour is a key: E+ itself does ACH x zone volume -> m3/s, so we never
+                        compute a flow rate.
+      N5..N8 A/B/C/D = 1/0/0/0 (the IDD default) makes the modifier bracket
+                        [A + B|dT| + C*wind + D*wind^2] exactly 1, so E+ applies the rate the
+                        FILE stated
+    """
+    zones_with_rate = [zone for zone in building.zones if zone.infiltration_ach is not None]
+    for zone in zones_with_rate:
+        idf.newidfobject("ZONEINFILTRATION:DESIGNFLOWRATE",
+                         Name=f"{zone.name}_Infiltration",
+                         Zone_or_ZoneList_or_Space_or_SpaceList_Name=zone.name,
+                         Design_Flow_Rate_Calculation_Method="AirChanges/Hour",
+                         Air_Changes_per_Hour=zone.infiltration_ach,
+                         Constant_Term_Coefficient=1.0, Temperature_Term_Coefficient=0.0,
+                         Velocity_Term_Coefficient=0.0, Velocity_Squared_Term_Coefficient=0.0)
+    if zones_with_rate:
+        for variable in ("Zone Infiltration Air Change Rate",          # proves the rate is applied
+                         "Zone Infiltration Sensible Heat Loss Energy",  # winter direction
+                         "Zone Infiltration Sensible Heat Gain Energy"):  # summer direction
+            idf.newidfobject("OUTPUT:VARIABLE", Key_Value="*", Variable_Name=variable,
+                             Reporting_Frequency="Hourly")
+    return len(zones_with_rate)
+
+
 def add_window_constructions(idf, window_constructions):
     """Emit glazing material + construction objects for window constructions."""
     for wc in window_constructions.values():
@@ -195,6 +266,7 @@ def build_idf(building, constructions, materials, window_constructions=None, out
     add_materials(idf, materials) # → MATERIAL / :NOMASS / :AIRGAP
     add_constructions(idf, constructions) # → CONSTRUCTION
     add_building(idf, building) # → ZONE + BUILDINGSURFACE:DETAILED
+    add_infiltration(idf, building) # → ZONEINFILTRATION:DESIGNFLOWRATE (only zones that state a rate)
     add_window_constructions(idf, window_constructions or {}) # → WINDOWMATERIAL:SIMPLEGLAZINGSYSTEM
     add_windows(idf, building, window_constructions or {}) # → FENESTRATIONSURFACE:DETAILED
     os.makedirs(out_dir, exist_ok=True)

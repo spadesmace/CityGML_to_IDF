@@ -97,6 +97,7 @@ class Surface:
 class Zone:
     """One E+ Zone (one per nrg3:ThermalZone, or one implicit building zone)."""
     name: str
+    infiltration_ach: Optional[float] = None   # nrg3:infiltrationRate in 1/h; None = file silent
     provenance: dict = field(default_factory=dict)
 
 

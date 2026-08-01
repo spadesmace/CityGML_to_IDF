@@ -16,7 +16,7 @@ UNITS vs VALIDITY are separate jobs: this answers "what unit is this?". Whether 
 LEGAL (IDD minima, a 0..1 ratio) is the caller's (materials._resolve_field,
 openings._checked_ratio, constructions._valid_fraction).
 
-LIMIT: reads only a plain symbol ("mm"), not a URI reference ("#u23", "urn:...", "http://...").
+NOTE LIMIT: reads only a plain symbol ("mm"), not a URI reference ("#u23", "urn:...", "http://...").
 To support them: resolve the ref to its gml:catalogSymbol first, then look that up here.
 """
 

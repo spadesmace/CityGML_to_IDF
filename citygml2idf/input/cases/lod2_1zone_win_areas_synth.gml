@@ -136,6 +136,8 @@
 							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
+					<!-- air leakage through the fabric; E+ ZoneInfiltration:DesignFlowRate, AirChanges/Hour -->
+					<nrg3:infiltrationRate uom="1/s">0.0001</nrg3:infiltrationRate>
 					<nrg3:isCooled>false</nrg3:isCooled>
 					<nrg3:isHeated>true</nrg3:isHeated>
 					<nrg3:coincidesWithLod2Hull>false</nrg3:coincidesWithLod2Hull>

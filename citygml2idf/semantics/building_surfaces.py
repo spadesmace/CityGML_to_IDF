@@ -20,7 +20,7 @@ so zones / openings / constructions / writer never care what LoD the file was.
 Kept deliberately small and reference-tolerant (surfaces may be inline OR an
 `xlink`) Recentring to a
 local origin happens later in model/reader.py, over the whole site; here the points
-are raw (assumed metric — no CRS reprojection  # TODO later we should add CRS check) but already wound OUTWARD.
+are raw (assumed metric — no CRS reprojection  # TODO later we should add CRS check but already wound OUTWARD.
 """
 
 from __future__ import annotations
@@ -297,13 +297,13 @@ class SurfacePath(Enum):
 def select_surface_path(doc, building, lod):
     """Return (SurfacePath, raw_records) for one building. NONE + [] when no source
     yields surfaces, so the caller can still trace the building yet emit no IDF."""
-    thermal = _thermal_boundary_surfaces(doc, building)
+    thermal = _thermal_boundary_surfaces(doc, building) #  can be used: LOD2 - LOD3
     if thermal:
         return SurfacePath.ENERGY_ADE_BOUNDARIES, thermal
-    shell = _labeled_surfaces(doc, building)
+    shell = _labeled_surfaces(doc, building) # LOD2 - LOD3
     if shell:
         return SurfacePath.CITYGML_BUILDING_SHELL, shell
-    solid = _solid_faces(doc, building, lod)
+    solid = _solid_faces(doc, building, lod) #LOD1
     if solid:
         return SurfacePath.RAW_SOLID_FALLBACK, solid
     return SurfacePath.NONE, []
