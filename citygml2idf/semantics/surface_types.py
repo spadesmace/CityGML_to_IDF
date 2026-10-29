@@ -16,12 +16,6 @@ from collections import namedtuple
 #                "Surface" and adds an explicit reciprocal partner
 SurfaceRule = namedtuple("SurfaceRule", ["role", "surface_type", "boundary"])
 
-# --- EnergyPlus 23.1 allowed keywords, verbatim from Energy+.idd 
-EPLUS_SURFACE_TYPES = ("Floor", "Wall", "Ceiling", "Roof")
-# BuildingSurface:Detailed > Outside Boundary Condition —
-EPLUS_BOUNDARY_CONDITIONS = (
-    "Adiabatic", "Surface", "Outdoors", "Ground")
-
 
 SURFACE_TYPES = {
     # ---- CityGML 2.0 (bldg:) exterior envelope — role given by the file
@@ -90,8 +84,8 @@ def floor_or_ceiling(normal_z):
     normal pointing UP (the zone lies below the face) -> Ceiling; pointing DOWN -> Floor.
 
     The SAME physical slab is a Ceiling to the zone BELOW it and a Floor to the zone
-    ABOVE it, so the normal must be taken relative to the OWNING ZONE (model/zones.py),
-    never the building — otherwise both faces of an interior slab come out identical."""
+    ABOVE it. In the Energy ADE each zone has its OWN surface for that slab, wound out of
+    that zone (the file's winding is kept), so each surface's own normal gives the answer."""
     return "Ceiling" if normal_z > 0 else "Floor"
 
 

@@ -7,7 +7,7 @@ readability and live next door:
     citygml_read.py — typed GML child readers (_child_text / _child_measure)
                       (the property/xlink resolver is doc.property_object() in xml_io.py)
     materials.py    — the 3 EnergyPlus material builders + DEFAULT_MATERIAL
-     # TODO archetypes.py   — the EXTERNAL archetype fallback (swappable JSON)  must add
+(Tier 3, an external archetype table, is not implemented — see the NOTE in _resolve_surface.)
 
 HOW A CONSTRUCTION AND ITS MATERIALS FIND EACH OTHER (Energy ADE 3.0):
   The link (construction -> layer -> material) is by gml:id ONLY — inline nesting OR
@@ -46,7 +46,7 @@ def _construction_name(doc, constr_el):
     their gml:id). We do NOT name by libraryCode."""
     if constr_el is None:
         return DEFAULT_NAME
-    return constr_el.get(GML_ID) or "construction"
+    return constr_el.get(GML_ID)
 
 
 # CityGML construction fallback:
@@ -124,7 +124,7 @@ def _from_citygml(doc, constr_el, materials):
                  f"below the EnergyPlus Material:NoMass minimum ({MIN_NOMASS_RESISTANCE}); "
                  f"unusable (wrong uom?), using the default construction")
         else:
-            mat_name = constr_el.get(GML_ID) or "citygml_construction"
+            mat_name = constr_el.get(GML_ID)
             u_text = f"citygml uValue {u_raw}{(' ' + u_uom) if u_uom else ''}"
             materials.setdefault(mat_name, Material(
                 name=mat_name, eplus="Material:NoMass",
@@ -304,7 +304,7 @@ def _construction_candidates(doc, surf_el, context_ids=None):
         constr_el = _construction_element(doc, owner_el)
         if constr_el is None:
             return
-        key = constr_el.get(GML_ID) or id(constr_el)
+        key = constr_el.get(GML_ID)              # always set: xml_io generates missing ids
         if key in seen:
             return
         seen.add(key)
@@ -327,16 +327,39 @@ def _construction_candidates(doc, surf_el, context_ids=None):
 #           Material:NoMass floor (`\minimum .001` m2-K/W, i.e. U > 1000 W/m2-K — not a
 #           building, almost always a wrong uom), the uValue is DISCARDED and the construction
 #           falls through to Tier 4. We never invent a replacement R.
+#   TIER 3  not implemented — see the NOTE inside _resolve_surface.
 #   TIER 4  DEFAULT construction    — nothing usable in the CityGML.
-#   TIER 3 (the EXTERNAL archetype fallback, keyed by building function/year/weight) 
 def _resolve_surface(doc, surf_el, surface_record, materials):
-    """Return (construction_name, Construction) for ONE surface.
+    """Resolve the EnergyPlus construction of one surface, most detailed source first.
 
-    The audit trail is NOT a separate structure: it is the single readable line that
-    `_construction_provenance_line` folds into `Surface.provenance["construction"]`, which is what
-    lands in the middle-layer JSON. Everything that line needs is already on the `Construction`
-    (its name = the gml:id, its `source` = which tier fired, its `source_context_id` = which owner
-    supplied it), so nothing else has to be carried around."""
+    Parameters
+    ----------
+    doc : CityGMLDoc
+        The loaded CityGML document.
+    surf_el : lxml element or None
+        The surface's own element: a BoundarySurface, or a raw ``gml:Polygon`` in LoD1
+        (a polygon is not a CityObject, so it cannot own a construction).
+    surface_record : Surface
+        The middle-layer surface. Its ``construction_context_ids`` are the fallback
+        owners (zone, then building), nearest first.
+    materials : dict
+        The shared material pool (name -> Material); new materials are added to it.
+
+    Returns
+    -------
+    tuple of (str, Construction)
+        The construction name (the construction's ``gml:id``, or ``DEFAULT_CONSTRUCTION``)
+        and the resolved Construction.
+
+    Notes
+    -----
+    Owners are tried in order: the surface itself, then its context owners. The first
+    owner whose construction yields something usable wins: Tier 1 = its ``nrg3:layer``
+    list, Tier 2 = its ``nrg3:uValue`` (Material:NoMass, R = 1/U). Tier 3 is not
+    implemented (see the NOTE in the body). Tier 4 = ``DEFAULT_CONSTRUCTION``.
+    The audit trail is the one line ``_construction_provenance_line`` builds from the
+    returned Construction (name, ``source`` = tier, ``source_context_id`` = owner).
+    """
     # For LoD1 raw solids, surf_el is a gml:Polygon and cannot own Energy ADE
     # layeredConstruction; the construction comes from the ThermalZone / Building
     # context passed in context_ids.
@@ -354,10 +377,11 @@ def _resolve_surface(doc, surf_el, surface_record, materials):
             resolved.source_context_id = owner_id
             return name, resolved
 
-    # ===== TIER 3 : EXTERNAL ARCHETYPE — DEFERRED (see the waterfall comment) =====
-    # A construction with no CityGML layers/uValue has no raw data to convert; in the raw
-    # converter it falls through to the default. The archetype JSON (model/archetypes.py),
-    # keyed by building function/year/weight, will fill this gap LATER.
+    # ===== TIER 3 : EXTERNAL ARCHETYPE — NOT IMPLEMENTED =====
+    # NOTE (future improvement): an external archetype table would be added EXACTLY HERE,
+    # between the file's own data (Tiers 1-2, above) and the default (Tier 4, below). It would
+    # be looked up by building TYPE, not by libraryCode — candidate keys: bldg:function,
+    # bldg:yearOfConstruction, nrg3:bdgConstructionWeight (TABULA / UBEM-CARDs style)
 
     # ===== TIER 4 : DEFAULT =====
     materials.setdefault(DEFAULT_MATERIAL.name, DEFAULT_MATERIAL)

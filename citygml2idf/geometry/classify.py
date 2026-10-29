@@ -14,8 +14,8 @@ from __future__ import annotations
 import math
 
 # --- thresholds in DEGREES (the physical, human-readable unit) ----------------
-# A face within 60deg of horizontal is roof/ground; within 60deg of vertical is a
-# wall. Tunable in ONE place. (HORIZONTAL_NZ below is the equivalent nz cut-line.)
+# tilt <= 60deg -> roof, tilt >= 120deg -> ground, otherwise (within 30deg of vertical)
+# -> wall. Tunable in ONE place.
 
 # Because real surfaces are never exactly flat
 ROOF_MAX_TILT_DEG = 60.0       # tilt <= 60deg  -> faces the sky   -> roof
@@ -38,18 +38,6 @@ def tilt_degrees(unit_normal):
     return math.degrees(math.acos(_clamped_nz(unit_normal)))
 
 
-# only used for debugging
-def azimuth_degrees(unit_normal):
-    """AZIMUTH the face looks toward, clockwise from North (Y+), in [0, 360).
-        azimuth = atan2(East, North) = atan2(nx, ny)
-    Returned for cross-checks/debug only — it never affects the role. A
-    near-horizontal face has no meaningful compass direction -> returns None."""
-    nx, ny = float(unit_normal[0]), float(unit_normal[1])
-    if math.hypot(nx, ny) < 1e-9:          # pointing almost straight up/down
-        return None
-    return math.degrees(math.atan2(nx, ny)) % 360.0
-
-
 def classify_by_normal(unit_normal,
                        roof_max_tilt=ROOF_MAX_TILT_DEG,
                        ground_min_tilt=GROUND_MIN_TILT_DEG):
@@ -67,8 +55,3 @@ def classify_by_normal(unit_normal,
     if tilt >= ground_min_tilt:
         return "ground"
     return "wall"
-
-
-# Backwards-compatible nz cut-line: cos(60deg) = 0.5. Equivalent to the tilt test
-# above (nz >= +0.5 <=> tilt <= 60deg; nz <= -0.5 <=> tilt >= 120deg).
-HORIZONTAL_NZ = math.cos(math.radians(ROOF_MAX_TILT_DEG))

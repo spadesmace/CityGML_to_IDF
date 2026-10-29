@@ -1,10 +1,10 @@
 """
- windows  the window as geometry 
-For each EXTERIOR wall, the richest->poorest cascade:
-  A. explicit `bldg:Window` geometry (LoD3, via `bldg:opening`) -> use the real polygon
-  B. `nrg3:bdgBdrySurfOpeningToSurfaceRatio` (WWR)              -> synthesize a window
-  C. `(totalSurfaceArea - opaqueSurfaceArea)/totalSurfaceArea`  -> synthesize a window
-  D. none                                                       -> opaque (no window)
+ windows  the window as geometry
+For each EXTERIOR wall, by the wall's LoD (ADE spec §4.3.1, Table 1):
+  LoD3 wall  explicit `bldg:Window` geometry (via `bldg:opening`) -> the real polygon; nothing else
+  LoD2 wall  `nrg3:bdgBdrySurfOpeningToSurfaceRatio` (WWR)       -> synthesize a window
+             else `(totalSurfaceArea - opaqueSurfaceArea)/total`  -> synthesize a window
+             else                                                 -> opaque (no window)
 
 Doors are skipped -> opaque for now
 
@@ -17,7 +17,7 @@ default `FALLBACK_WINDOW` glazing. Each resolved glazing is deduped into
 
 >4-vertex windows: EnergyPlus caps FenestrationSurface:Detailed at 4 vertices, so an
 explicit window polygon with more corners is reduced to its in-plane bounding quad
-(`rings.simplify_to_quad`) before it is emitted.
+(`rings.bounding_rectangle`) before it is emitted.
 """
 
 from __future__ import annotations
@@ -60,19 +60,24 @@ def window_ring(doc, window_element):
     allowed, and LoD2 uses ratios/areas rather than explicit opening geometry.
     """
     geometry = doc.children(window_element, "bldg", "lod3MultiSurface")
-    return xml_io.read_pos_list(doc, geometry[0]) if geometry else []
+    target = doc.property_object(geometry[0]) if geometry else None   # inline OR xlink
+    found = [ring for _, ring in xml_io.surface_polygons(doc, target) if ring] if target is not None else []
+    if len(found) > 1:                                  # one polygon per window, like surfaces
+        warn(f"window {window_element.get(GML_ID)}: {len(found)} polygons; only the first is read "
+             f"(one polygon per window)")
+    return found[0] if found else []
 
 # LOD 3
 def explicit_windows(doc, wall_element, wall_points, origin_offset, window_constructions):
     """LoD3 explicit `bldg:Window` polygons, recentred to the building origin, each with
     its OWN glazing construction.
 
-    WINDING: the file's vertex order is NEVER trusted — the same  rule the walls already
-    follow (rings.orient_outward). A window is re-wound to face the SAME WAY AS ITS WALL
-    (rings.orient_like), because the writer promises EnergyPlus that every polygon is entered
-    Counterclockwise "as viewed from OUTSIDE the surface" (GlobalGeometryRules / IDD), and
-    CityGML guarantees no winding at all. `wall_points` are already oriented outward, so the wall's normal is the
-    reference; both are in the same recentred frame, and translation cannot change a normal."""
+    WINDING: the wall keeps the FILE's winding (building_surfaces.process_surfaces). The window
+    is re-wound to face the SAME WAY AS ITS WALL (rings.face_like): the writer promises
+    EnergyPlus that every polygon is entered Counterclockwise "as viewed from OUTSIDE the
+    surface" (GlobalGeometryRules), and a window facing against its wall crashes EnergyPlus
+    (measured: exit 0xC0000409). Wall and window are in the same recentred frame, and
+    translation cannot change a normal."""
     offset_x, offset_y, offset_z = origin_offset
     wall_normal = rings.unit_normal(rings.drop_closing_point(wall_points))
     found_windows = []
@@ -83,15 +88,16 @@ def explicit_windows(doc, wall_element, wall_points, origin_offset, window_const
             continue
         ring = rings.drop_closing_point(window_ring(doc, window_element))
         if len(ring) < 3:
-            warn(f"window {window_element.get(GML_ID) or '(no id)'} has no LoD3 geometry; falling back to ratios/areas")
+            warn(f"window {window_element.get(GML_ID)}: its LoD3 geometry cannot be read "
+                 f"(not supported yet); no window")
             continue
-        quad = rings.simplify_to_quad(ring)            # E+ fenestration is capped at 4 vertices
+        quad = rings.bounding_rectangle(ring)          # E+ fenestration is capped at 4 vertices
         recentred_points = [[float(x - offset_x), float(y - offset_y), float(z - offset_z)]
                             for (x, y, z) in quad]
-        aligned, _normal = rings.orient_like(recentred_points, wall_normal)   # face the wall's way
+        aligned, _normal = rings.face_like(recentred_points, wall_normal)   # face the wall's way
         was_reversed = [list(p) for p in aligned] != recentred_points
         if was_reversed:
-            warn(f"window {window_element.get(GML_ID) or '(no id)'}: vertices ran opposite to "
+            warn(f"window {window_element.get(GML_ID)}: vertices ran opposite to "
                  f"wall {wall_element.get(GML_ID)}; re-wound to face the same way")
         window_points = [[float(x), float(y), float(z)] for (x, y, z) in aligned]
         area = round(rings.polygon_area(window_points), 3)
@@ -102,7 +108,7 @@ def explicit_windows(doc, wall_element, wall_points, origin_offset, window_const
                             if len(ring) > 4 else "")
                          + (", re-wound to match the wall's outward normal" if was_reversed else ""))
         found_windows.append(Window(
-            source_id=window_element.get(GML_ID) or "window",
+            source_id=window_element.get(GML_ID),
             points=window_points, area=area, source="explicit",
             construction=construction_name,
             provenance={"geometry": geometry_note,
@@ -151,7 +157,7 @@ def window_to_wall_ratio_from_attributes(doc, wall_element):
     BEFORE the subtraction, so a file may legally state them in DIFFERENT area units (m^2 and
     cm^2) and still yield the right ratio. Comparing the two uom STRINGS instead would reject
     "m^2" vs "m2" — the same unit spelled two ways — and lose a real window."""
-    wall_id = wall_element.get(GML_ID) or "wall"
+    wall_id = wall_element.get(GML_ID)
 
     stated_ratio, ratio_uom = _child_measure(doc, wall_element, "nrg",
                                              "bdgBdrySurfOpeningToSurfaceRatio")
@@ -202,7 +208,7 @@ def synthesize_window(wall_points, window_to_wall_ratio):
     WINDING is inherited for free: the wall ring is ALREADY oriented outward, and scaling it
     about its own centre keeps the vertex ORDER, so the synthesized window necessarily faces
     the same way as its wall. Only an EXPLICIT (LoD3) window, whose vertices come from the
-    file, has to be re-wound (see explicit_windows / rings.orient_like)."""
+    file, has to be re-wound (see explicit_windows / rings.face_like)."""
     corners = rings.drop_closing_point(wall_points)
     center_x = sum(corner[0] for corner in corners) / len(corners)
     center_y = sum(corner[1] for corner in corners) / len(corners)
@@ -214,19 +220,44 @@ def synthesize_window(wall_points, window_to_wall_ratio):
 
 
 def windows_for_wall(doc, wall_element, wall_points, origin_offset, window_constructions):
-    """ one exterior wall -> a list of Window objects (or [] = opaque).
-"""
-    windows_from_geometry = explicit_windows(doc, wall_element, wall_points, origin_offset,
-                                             window_constructions)
-    if windows_from_geometry:                                          
-        return windows_from_geometry
-    
+    """One exterior wall -> its list of Window objects ([] = opaque).
+
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    wall_element : lxml element
+        The wall's boundary surface.
+    wall_points : list
+        The wall's recentred points (file winding).
+    origin_offset : list
+        The building's recentring shift.
+    window_constructions : dict
+        The model's glazing pool, filled in place.
+
+    Returns
+    -------
+    list of Window
+
+    Notes
+    -----
+    LoD3 wall (geometry is bldg:lod3MultiSurface): windows come ONLY from its bldg:Window
+    objects. ADE spec §4.3.1: "For the opening(s), the corresponding CityGML classes (Window or
+    Door) must be used"; Table 1: thermal openings "must be modelled (if they exist) via openings".
+    A LoD3 wall without a Window has no window; the ratio is never used.
+    LoD2 wall: no opening objects exist (CityGML 2.0 §10.3.9 req. 8), so the window comes from
+    the surface's own attributes: bdgBdrySurfOpeningToSurfaceRatio, else (total - opaque) / total.
+    """
+    if doc.children(wall_element, "bldg", "lod3MultiSurface"):        # LoD3: openings ONLY
+        return explicit_windows(doc, wall_element, wall_points, origin_offset,
+                                window_constructions)
+
     window_to_wall_ratio, ratio_note = window_to_wall_ratio_from_attributes(doc, wall_element)  
     if window_to_wall_ratio and window_to_wall_ratio > 0:
         window_points = synthesize_window(wall_points, window_to_wall_ratio)
         area = round(rings.polygon_area(window_points), 3)
         construction_name = _register_glazing(default_window_construction(), window_constructions)
-        return [Window(source_id=(wall_element.get(GML_ID) or "wall") + "_win",
+        return [Window(source_id=wall_element.get(GML_ID) + "_win",
                        points=window_points, area=area,
                        source="wwr", wwr=round(window_to_wall_ratio, 3),
                        construction=construction_name,

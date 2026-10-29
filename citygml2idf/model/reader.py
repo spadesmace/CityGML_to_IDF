@@ -39,12 +39,24 @@ def _parse_epsg(srs_name):
 def build_middle_layer(doc, detailed_interior=False):
     """Parse every building into the ONE typed middle layer (model.Model).
 
-    Every object carries its data plus a flat `provenance` map (what we did per field)
-    for audit. A building with no usable surfaces (e.g. LoD0 footprint only) is KEPT in
-    the Model for the audit trail but skipped during IDF generation.
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    detailed_interior : bool, optional
+        False (default) = FAST indoor model (interior faces Adiabatic); True = model
+        interior heat transfer (model/zones.py, boundary rung 0).
 
-    detailed_interior: False (default) = FAST indoor model (interior faces Adiabatic);
-                       True = model interior heat transfer (see model/zones.py rung 0).
+    Returns
+    -------
+    Model
+        Every building, each object with its data plus a flat `provenance` map.
+
+    Warns
+    -----
+    ONCE per building that gets no IDF, with the reason: no readable surface, or dropped by
+    model/zones.py (``building.provenance["skipped"]``). Such a building stays in the Model
+    for the audit trail; the writer skips it because it has no surfaces.
     """
     # 1. geometry + roles per building (points still in the file's CRS)
     buildings = []
@@ -70,7 +82,7 @@ def build_middle_layer(doc, detailed_interior=False):
             s.points = [[float(x - ox), float(y - oy), float(z - oz)]
                         for (x, y, z) in s.points]
             s.area = round(rings.polygon_area(s.points), 3)  # computed from the polygon points
-            s.provenance["points"] = ("gml:posList (assumed metric) -> outward orientation "
+            s.provenance["points"] = ("gml:posList (assumed metric) -> file winding kept "
                                       "-> recentre to building origin "
                                       f"{[round(float(ox), 1), round(float(oy), 1), round(float(oz), 1)]}")
             s.provenance["area"] = f"{s.area} m2 (derived from recentred points)"
@@ -81,7 +93,7 @@ def build_middle_layer(doc, detailed_interior=False):
                   buildings=buildings)
 
     # These modules enrich the same Model in place (parser concerns). adjacency reads the
-    # schema-native FACTS (isAdiabatic / relatedTo-adjacent) onto each Surface; zones then
+    # schema-native FACTS (isAdiabatic / relatedTo-adjacentTo) onto each Surface; zones then
     # turns zone ownership + those facts into the EnergyPlus boundary. 
     # NOTE interzone windows (not modelled): openings runs BEFORE zones, so a window is attached
     constructions.resolve_all(doc, model)
@@ -89,10 +101,11 @@ def build_middle_layer(doc, detailed_interior=False):
     adjacency.attach_facts(doc, model)
     zones.assign_zones(doc, model, detailed_interior=detailed_interior)
 
-    for bld in model.buildings:
+    for bld in model.buildings:                       # the ONE warning per building without IDF
         if not bld.surfaces:
-            xml_io.warn(f"building {bld.id}: no surfaces "
-                        f"(surface_path={bld.surface_path}); skipped from IDF output")
+            reason = bld.provenance.setdefault(
+                "skipped", f"no readable surface (surface_path={bld.surface_path})")
+            xml_io.warn(f"building {bld.id}: no IDF written; {reason}")
     return model
 
 

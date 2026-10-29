@@ -16,7 +16,6 @@ from eppy.modeleditor import IDF
 
 from ..citygml import xml_io
 from ..semantics.surface_types import sun_wind_exposure
-from ..model.model import Zone
 from ..model.reader import build_middle_layer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,13 +72,11 @@ def new_empty_idf():
                      Use_Weather_File_Snow_Indicators="Yes")
 
     # Fixed ground temperatures for surfaces with the Ground boundary condition.
-    # EnergyPlus defaults these fields to 18 C; writing them explicitly suppresses warnings.
-    #  NOTE KNOWN BIAS: 18 C comes from the IDD rule "2 C below average indoor temperature", written for
-    # CONDITIONED buildings whose heating warms the soil. A free-float building does not.
+    
     gt = idf.newidfobject("SITE:GROUNDTEMPERATURE:BUILDINGSURFACE")
     for month in ("January", "February", "March", "April", "May", "June", "July",
                   "August", "September", "October", "November", "December"):
-        setattr(gt, f"{month}_Ground_Temperature", 15.0)
+        setattr(gt, f"{month}_Ground_Temperature", 18.0)
         
     # ================= OUTPUTS ======= (uncomment what you wnat)
     # Geometry and result reports.
@@ -176,18 +173,25 @@ def _vertex_fields(points):
 
 
 def add_building(idf, building):
-    """Emit zones, then one BuildingSurface:Detailed per middle-layer surface."""
-    zone_list = building.zones or [Zone(f"{building.id}_Zone")]
-    for zone in zone_list:
+    """Emit one Zone per middle-layer zone, then one BuildingSurface:Detailed per surface.
+
+    Parameters
+    ----------
+    idf : eppy.modeleditor.IDF
+        The IDF being built, changed in place.
+    building : Building
+        A building that passed model/zones.py: it has at least one zone and every surface
+        names its zone. The writer invents no zone (a building without one was dropped there).
+    """
+    for zone in building.zones:
         idf.newidfobject("ZONE", Name=zone.name, Multiplier=1, Ceiling_Height="autocalculate",
                          Volume="autocalculate")
-    default_zone = zone_list[0].name
     for surface in building.surfaces:
         boundary = surface.boundary
         sun, wind = sun_wind_exposure(boundary)
         idf.newidfobject(
             "BUILDINGSURFACE:DETAILED", Name=surface.source_id, Surface_Type=surface.surface_type,
-            Construction_Name=surface.construction, Zone_Name=surface.zone or default_zone,
+            Construction_Name=surface.construction, Zone_Name=surface.zone,
             Outside_Boundary_Condition=boundary,
             Outside_Boundary_Condition_Object=surface.boundary_object,
             Sun_Exposure=sun, Wind_Exposure=wind, Number_of_Vertices=len(surface.points),

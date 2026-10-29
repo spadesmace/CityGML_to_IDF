@@ -1,52 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================================
-  SUPPORT SAMPLE (not an Energy ADE Table-2 case) - the AIRTIGHT TWIN of
+  SUPPORT SAMPLE (not a Table-2 case): the AIRTIGHT twin of
   case6.1_lod3_1zone_hull_win_SpecificationADE.gml.
   SYNTHETIC, self-contained (every reference resolves inside this file).
   ============================================================================
 
-  WHY THIS FILE EXISTS
-    To make "what does infiltration do?" a CONTROLLED experiment. This is case 6.1
-    with nrg3:infiltrationRate deleted from the ThermalZone AND NOTHING ELSE
-    CHANGED: same box, same 6 surfaces, same 2 windows, same constructions, same
-    coincidesWithLod3Hull zoning.
+  PARSE PATH
+    The same as case 6.1 (6 thematic surfaces, hull zoning, detailed layers, 2
+    windows) EXCEPT infiltration: the zone states no nrg3:infiltrationRate, so NO
+    ZoneInfiltration object and NO "Zone Infiltration ..." output variable are written,
+    and the reader prints one warning naming the zone. No air change rate is invented.
 
-    INTENT: a real free-float model SHOULD always carry infiltration - a sealed
-    zone behaves like a thermos flask. This file is a DIAGNOSTIC that shows how
-    far that single number moves the answer. It is NOT a template to copy.
+  GEOMETRY
+    Unchanged: the 10 x 8 x 3 box of case 6.1 with its 2 windows (3.00 + 1.44 m2).
 
-  WHAT WAS REMOVED - and only this
-    * nrg3:infiltrationRate from the ThermalZone. XSD ThermalZoneType declares it
-      minOccurs="0", so omitting it is schema-valid; the rest of the sequence
-      (isCooled, isHeated, coincidesWithLod2Hull, coincidesWithLod3Hull,
-      thermalBoundary) is untouched and still in schema order.
-    * bldg:Building gml:id -> Case61_NoInfiltration, so run.py writes a SEPARATE
-      output/runs/ folder. Every OTHER gml:id is UNCHANGED, so the two runs pair
-      up zone-by-zone and surface-by-surface.
+  ENERGY ADE CONTENT (what differs from case 6.1, and nothing else)
+    * nrg3:infiltrationRate removed from the ThermalZone. The XSD declares it
+      minOccurs="0", so leaving it out is valid; the rest of the zone keeps the XSD order.
+    * bldg:Building gml:id = Case61_NoInfiltration (its own output folder). Every
+      other gml:id is the same as in case 6.1, so the runs pair up surface by surface.
+    A real free-floating model should always carry infiltration (a sealed zone acts
+    like a thermos flask): this file is a controlled experiment, not a template.
 
-  PARSE PATH (the PREDICTION this sample tests)
-    geometry / physics / zoning / openings : ALL IDENTICAL to case 6.1
-                (6 surfaces, TIER 1 layers, hull zoning, 2 explicit windows).
-    infiltration : zones.infiltration_air_changes() finds nothing ->
-                   Zone.infiltration_ach = None, provenance status "absent",
-                   and a WARNING is printed naming the zone.
-                   The IDF must contain NO ZoneInfiltration:DesignFlowRate, and
-                   therefore NO "Zone Infiltration ..." Output:Variable either -
-                   writer.add_infiltration requests those ONLY when it wrote an
-                   object, because asking E+ for a variable it cannot produce
-                   raises a warning and would dirty the clean-.err gate.
-
-  GEOMETRY - unchanged 10 (x) x 8 (y) x 3 (z) box, 2 windows (3.00 + 1.44 m2).
-
-  TEST AIM - RUN 1 (case 6.1, 0.3 1/h) vs RUN 3 (this file, sealed), same weather
-    * "Zone Infiltration Air Change Rate" exists in RUN 1 and is ABSENT here.
-    * Expect this run WARMER in winter AND cooler-peaking in summer: a sealed zone
-      is decoupled from outdoor air in BOTH directions, so its swing is NARROWER
-      and it sits further from the outdoor mean.
-    Measured 2026-07-30 by stripping the E+ object directly from 6.1's IDF (same
-    geometry): operative T min 12.32 -> 14.24 C, max 22.60 -> 21.93 C.
-    This file must reproduce that from the GML side.
+  TEST AIM
+    1. XSD gate passes; the reader warns once that the zone states no infiltration rate.
+    2. The IDF equals case 6.1 except: no ZoneInfiltration:DesignFlowRate and no
+       infiltration output variables.
+    3. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings.
+    4. Purpose: compared with case 6.1, show how much the infiltration rate alone moves
+       the free-floating temperature.
 -->
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
                 xmlns:bldg="http://www.opengis.net/citygml/building/2.0"
@@ -393,7 +376,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 

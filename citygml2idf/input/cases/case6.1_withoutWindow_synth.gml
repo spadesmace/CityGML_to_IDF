@@ -1,59 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================================
-  SUPPORT SAMPLE (not an Energy ADE Table-2 case) - the WINDOW-LESS TWIN of
+  SUPPORT SAMPLE (not a Table-2 case): the WINDOW-LESS twin of
   case6.1_lod3_1zone_hull_win_SpecificationADE.gml.
   SYNTHETIC, self-contained (every reference resolves inside this file).
   ============================================================================
 
-  WHY THIS FILE EXISTS
-    To make "what does a window do?" a CONTROLLED experiment. This is case 6.1
-    with the two bldg:Window openings deleted AND NOTHING ELSE CHANGED: same
-    10 x 8 x 3 box, same 6 thematic surfaces, same three detailed constructions,
-    same 0.3 1/h infiltration, same coincidesWithLod3Hull zoning.
-    Case 2.1 could NOT serve as the window-less control: its roof differs from
-    6.1's (0.16 m insulation + an air gap, vs 0.20 m lambda 0.04), so a 2.1-vs-6.1
-    delta would mix the roof, the per-field defaulting AND the glazing.
+  PARSE PATH
+    The same as case 6.1 (6 thematic surfaces, hull zoning, detailed layers, 0.3 ACH)
+    EXCEPT the windows: there are none, so the IDF has no FenestrationSurface:Detailed
+    and no WindowMaterial:SimpleGlazingSystem.
 
-  WHAT WAS REMOVED - and only this
-    * bldg:opening -> bldg:Window on the SOUTH and EAST walls (2 windows,
-      3.00 + 1.44 = 4.44 m2 of glazing) with their glazing LayeredConstruction
-      xlinks. XSD: bldg:opening is minOccurs="0", so omitting it is valid.
-    * the gml:interior LinearRing inside each of those two wall polygons. In LoD3
-      an interior ring IS the hole an opening fills, so a hole left WITHOUT its
-      Window would describe an unfilled void. gml:interior is optional, so
-      removing it is valid too.
-    * KEPT: the NORTH bldg:Door and its hole. openings.py skips doors, so it
-      changes no output, and keeping it holds the diff to exactly "the windows".
-    * bldg:Building gml:id -> Case61_WithoutWindow, so run.py writes a SEPARATE
-      output/runs/ folder instead of overwriting case 6.1's. Every OTHER gml:id
-      (zone, surfaces, constructions, materials) is UNCHANGED on purpose, so the
-      two runs pair up zone-by-zone and surface-by-surface in the comparison.
+  GEOMETRY
+    Unchanged: the 10 x 8 x 3 box of case 6.1, every face counter-clockwise seen from
+    outside. Wall areas are gross, so both runs share exactly the same envelope area.
 
-  PARSE PATH (the PREDICTION this sample tests)
-    geometry  : SurfacePath.CITYGML_BUILDING_SHELL, 6 surfaces - IDENTICAL to 6.1
-    physics   : per-surface nrg3:layeredConstruction -> TIER 1 detailed layers,
-                IDENTICAL to 6.1
-    zoning    : coincidesWithLod3Hull -> the single zone owns all 6 surfaces
-    openings  : ZERO. Branch A finds no bldg:Window; branches B and C find no
-                ratio / area attributes -> branch D, opaque.
-                The IDF must contain NO FenestrationSurface:Detailed and NO
-                WindowMaterial:SimpleGlazingSystem.
-    windows   : 0         (case 6.1: 2)
-    infiltr.  : 0.3 1/h   (same as 6.1)
+  ENERGY ADE CONTENT (what differs from case 6.1, and nothing else)
+    * The two bldg:opening / bldg:Window elements (south and east, 3.00 + 1.44 m2 of
+      glazing) are removed, with their glazing construction XLinks.
+    * The two gml:interior rings they filled are removed too: in LoD3 a hole IS the
+      place of an opening, so a hole without its window would be an empty void.
+    * KEPT: the north bldg:Door and its hole (doors are not written yet, so this
+      changes no output and keeps the difference to "the windows" only).
+    * bldg:Building gml:id = Case61_WithoutWindow (its own output folder). Every
+      other gml:id is the same as in case 6.1, so the runs pair up surface by surface.
+    Case 2.1 cannot be the window-less control: its roof construction differs from
+    case 6.1's, so a comparison would mix the roof and the glazing.
 
-  GEOMETRY - unchanged 10 (x) x 8 (y) x 3 (z) box. Faces CCW seen from OUTSIDE.
-    ground z=0  80 m2 | roof z=3  80 m2
-    south  y=0  30 m2 | north y=8  30 m2 | east x=10  24 m2 | west x=0  24 m2
-    Areas are GROSS and IDENTICAL to 6.1 (the parser ignores 6.1's holes anyway),
-    so both runs share exactly the same envelope area.
-
-  TEST AIM - RUN 1 (case 6.1) vs RUN 2 (this file), same weather
-    * Zone Windows Total Transmitted Solar Radiation Rate: > 0 W in 6.1, 0 W here.
-    * Expect a LOWER summer peak here (no solar gain) and a HIGHER winter minimum
-      (U 1.4 glazing is the envelope's weak point at night).
-    * Expect a SMALLER daily swing here.
-    Any difference in envelope AREA between the two runs is a BUG, not a result.
+  TEST AIM
+    1. XSD gate passes; zero windows and no glazing objects in the IDF.
+    2. Envelope areas and ACH are identical to case 6.1.
+    3. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings.
+    4. Purpose: compared with case 6.1, show what the windows do (solar gain by day,
+       heat loss through the glazing at night).
 -->
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
                 xmlns:bldg="http://www.opengis.net/citygml/building/2.0"
@@ -361,7 +340,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 

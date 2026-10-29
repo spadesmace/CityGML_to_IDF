@@ -1,52 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================================
-  SUPPORT SAMPLE (not an Energy ADE Table-2 case) - the POORLY INSULATED TWIN of
+  SUPPORT SAMPLE (not a Table-2 case): the POORLY INSULATED twin of
   case6.1_lod3_1zone_hull_win_SpecificationADE.gml.
   SYNTHETIC, self-contained (every reference resolves inside this file).
   ============================================================================
 
-  WHY THIS FILE EXISTS
-    Reviewing the free-float results, the observation was: "the room never drops
-    below 12 C for a whole week while it is -10 C outside - that is not a normal
-    building". Inspecting the IDF showed why: case 6.1 has wall U = 0.26 and roof
-    U = 0.19 W/m2K, i.e. CURRENT Italian building-code values, not an ordinary
-    building. This file is the same box built badly, so the two can be compared.
+  PARSE PATH
+    The same as case 6.1: 6 thematic surfaces, hull zoning, 2 windows, 0.3 ACH. Only
+    two layer thicknesses differ.
 
-  WHAT WAS CHANGED - and only this
-    * wall insulation  0.12 m -> 0.02 m   (nrg3:thickness on Case61_layer_wall_insulation)
-    * roof insulation  0.20 m -> 0.02 m   (nrg3:thickness on Case61_layer_roof_insulation)
-    * bldg:Building gml:id -> Case61_ThinInsulation, so run.py writes a SEPARATE
-      output/runs/ folder. Every OTHER gml:id is UNCHANGED, so the runs pair up
-      zone-by-zone and surface-by-surface in the comparison.
+  GEOMETRY
+    Unchanged: the 10 x 8 x 3 box of case 6.1.
 
-  WHAT WAS DELIBERATELY *NOT* CHANGED
-    The GROUND FLOOR. It is already bare concrete (60 mm screed + 250 mm slab, NO
-    insulation, U = 2.84 W/m2K with films) - there is nothing to strip, and a real
-    old building has exactly that. Leaving it alone isolates the wall/roof change
-    AND exposes the second effect: even with the walls stripped, the bare slab
-    keeps conducting heat in from the 18 C ground. See the InsulatedGround twin.
-
-  PARSE PATH - IDENTICAL to case 6.1 in every respect
-    geometry / zoning / openings / infiltration are untouched: 6 surfaces from the
-    CITYGML_BUILDING_SHELL path, coincidesWithLod3Hull zoning, 2 explicit windows,
-    0.3 1/h infiltration. Only the construction LAYERS differ.
-
-  PREDICTION (hand calculation, steady state, no sun, outdoor air -10 C)
-                                  case 6.1        this file
-      wall  U with films            0.26            1.01   W/m2K
-      roof  U with films            0.19            1.39   W/m2K
-      ground U (unchanged)          2.84            2.84   W/m2K
-      envelope loss to outdoor      72.6           246.2   W/K
-      ground gain path (18 C)      227.4           227.4   W/K   <- unchanged
-      room settles at              11.2             3.4    C
-    (EnergyPlus reports Constructions.Uvalue WITHOUT surface films, so it will show
-     ~1.22 for the wall and ~1.72 for the roof - the same constructions, other convention.)
+  ENERGY ADE CONTENT (what differs from case 6.1, and nothing else)
+    * wall insulation thickness 0.12 m -> 0.02 m (Case61_layer_wall_insulation)
+    * roof insulation thickness 0.20 m -> 0.02 m (Case61_layer_roof_insulation)
+    * bldg:Building gml:id = Case61_ThinInsulation (its own output folder). Every
+      other gml:id is the same as in case 6.1, so the runs pair up surface by surface.
+    The ground is NOT changed: it is already a bare concrete slab, as in an old building.
 
   TEST AIM
-    Confirm the room really does fall when the insulation is poor, and measure by
-    how much. Envelope AREAS, window area and ACH must stay IDENTICAL to case 6.1 -
-    any difference there is a bug, not a result.
+    1. XSD gate passes; the IDF equals case 6.1 except those two thicknesses.
+    2. Envelope areas, window areas and ACH are identical to case 6.1.
+    3. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings.
+    4. Purpose: compared with case 6.1, show how far the free-floating zone falls when
+       the walls and the roof are poorly insulated.
 -->
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
                 xmlns:bldg="http://www.opengis.net/citygml/building/2.0"
@@ -393,7 +372,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 

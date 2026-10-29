@@ -27,6 +27,10 @@ citygml2idf/templates/EnergyPlusToFMU/
 # Local generated previews
 *_preview.png
 
+# Full CityGML 2.0 + Energy ADE 3.0 schema set, codelists and spec text: local reference only.
+# The subset the XSD gate needs stays tracked in citygml2idf/validation_file/CityGml_ADE_SChema/.
+/citygml2idf/CityGml_ADE_SChema/
+
 # Docs / notes kept local only, never pushed
 *.md
 

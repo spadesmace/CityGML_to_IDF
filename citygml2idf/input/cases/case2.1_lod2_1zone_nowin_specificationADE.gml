@@ -1,101 +1,66 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================================
-  Energy ADE 3.0 — Table 2, CASE 2.1
-  "Single LoD2 thermal zone, no thermal openings, SOME LoD2 thermal boundaries
-   may have the SAME GEOMETRY as the corresponding building LoD2 thematic
+  Energy ADE 3.0, Table 2, CASE 2.1
+  "Single LoD2 thermal zone, no thermal openings, some LoD2 thermal boundaries
+   may have the same geometry of the corresponding building LoD2 thematic
    surfaces (and others don't)"
   SYNTHETIC, self-contained (every reference resolves inside this file).
   ============================================================================
 
-  PARSE PATH (the PREDICTION this sample tests)
-    geometry  : SurfacePath.ENERGY_ADE_BOUNDARIES
-                The building has BOTH bldg:boundedBy thematic surfaces AND a
-                ThermalZone with nrg3:thermalBoundary. select_surface_path() must
-                pick the thermal boundaries (most detailed first) and must NOT
-                also emit the 6 thematic surfaces -> exactly 6 surfaces, not 12.
-    physics   : per-surface — each thermalBoundary xlinks its own
-                nrg3:layeredConstruction -> TIER 1 (DETAILED LAYERS), not Tier 2.
-                Case 1.1 already proved the averaged-uValue path (Material:NoMass);
-                THIS case proves the detailed path: real nrg3:SolidMaterial layers
-                -> E+ Material (+ one nrg3:Gas -> Material:AirGap).
-                The THEMATIC surfaces carry NO construction ON PURPOSE: if the
-                parser ever read the shell instead, the constructions would fall
-                to DEFAULT and the mistake would be immediately visible.
-    zoning    : one nrg3:ThermalZone owning all 6 boundaries via thermalBoundary.
-    windows   : NONE. LoD2 forbids thermal openings, and no ADE opening ratio /
-                area attribute is present -> the IDF must contain ZERO
-                FenestrationSurface:Detailed objects.
+  PARSE PATH (what the reader must do with this file)
+    geometry      : the 6 nrg3:thermalBoundary surfaces of the zone. The building's
+                    bldg:boundedBy thematic shell also exists and must NOT be read as
+                    well (6 surfaces, not 12).
+    zones         : one nrg3:ThermalZone owning its 6 boundaries.
+    constructions : each boundary XLinks its own detailed LayeredConstruction: real
+                    layers, SolidMaterial -> E+ Material, Gas -> Material:AirGap. The
+                    thematic surfaces carry NO construction on purpose: had the shell
+                    been read by mistake, every face would fall to the default.
+    windows       : none (no openings in LoD2, no opening ratio or area attributes).
+    infiltration  : 0.3 1/h -> ZoneInfiltration 0.3 ACH.
 
   GEOMETRY
-    The same 10 (x) x 8 (y) x 3 (z) box as case 1.1, so the numbers are directly
-    comparable. Faces wound CCW seen from OUTSIDE.
-      ground z=0   80 m2  |  roof z=3   80 m2
-      south  y=0   30 m2  |  north y=8  30 m2
-      east   x=10  24 m2  |  west  x=0  24 m2
-    Total envelope = 268 m2.  Zone volume = 240 m3.
+  A 10 (x) x 8 (y) x 3 (z) box at the origin; every face counter-clockwise seen
+  from outside (its normal points out).
+    ground z=0   80 m2  |  roof  z=3   80 m2
+    south  y=0   30 m2  |  north y=8   30 m2  |  east x=10  24 m2  |  west x=0  24 m2
+  Total envelope 268 m2; zone volume 240 m3 (= the stated nrg3:volume).
+  The same box as case 1.1, so the numbers compare directly.
 
-  ENERGY ADE CONTENT — TWO things are under test at once, on two different axes.
-
-  (A) HOW A THERMAL BOUNDARY GETS ITS GEOMETRY. The spec allows an XLink to the
-      corresponding thematic surface's LoD2 geometry when the two coincide. This
-      sample deliberately uses ALL THREE legal forms, so one file proves the
-      parser handles each:
-        tb_wall_south : PROPERTY-LEVEL XLINK
-                        <bldg:lod2MultiSurface xlink:href="#..._MS_wall_south"/>
-                        The property element is EMPTY — its geometry lives elsewhere.
-        tb_wall_east  : MEMBER-LEVEL XLINK
-                        own <gml:MultiSurface> whose <gml:surfaceMember> XLinks the
-                        thematic surface's <gml:Polygon>.
-        tb_ground / tb_roof / tb_wall_north / tb_wall_west : OWN INLINE GEOMETRY
-                        ("...and others don't")
-
-      tb_wall_north also carries an nrg3:relatedTo / CityObjectRelation with
-      relationType = "correspondsTo", pointing at its thematic twin — the spec's
-      "RelationToCityObject" bullet. This is a BOOKKEEPING note ("same wall, two
-      views"), NOT an adjacency. adjacency.py must IGNORE it (it acts only on
-      relationType = "adjacent"), so the wall must stay Outdoors, never Adiabatic.
-
-  (B) DETAILED-LAYER CONSTRUCTIONS, with DELIBERATE GAPS + NON-SI UNITS, to prove
-      PER-FIELD resolution: every value the file gives is KEPT (converted when its
-      uom needs it) and ONLY the truly missing field is defaulted. Never a
-      whole-material default because one number is absent.
-
-        UNIT CONVERSIONS the parser must perform (units.py):
-          wall plaster thickness  1.5 cm          -> 0.015 m
-          wall brick   density    1.8 g/cm^3      -> 1800 kg/m3
-          wall insul.  cp         1.03 kJ/(kg*K)  -> 1030 J/(kg-K)
-
-        MISSING FIELDS the parser must default (materials.py), one per material,
-        each in a DIFFERENT material so they cannot mask each other:
-          wall plaster    : NO specificHeatCapacity -> default 900  J/(kg-K)
-          wall insulation : NO density              -> default 1000 kg/m3
-          roof insulation : NO thermalConductivity  -> default 1.0  W/(m-K)
-
-        CONTROLS (complete materials — must come through untouched):
-          wall brick, roof plasterboard, ground screed, ground concrete
-        GAS layer (roof air gap): nrg3:Gas with a real rValue -> Material:AirGap.
-
-      LAYER ORDER: the ADE lists layers INSIDE -> OUTSIDE (spec §3.8); EnergyPlus
-      CONSTRUCTION wants OUTSIDE first. The writer reverses them, so in the IDF the
-      wall's Outside_Layer must be the BRICK and the last layer the PLASTER.
+  ENERGY ADE CONTENT
+    (A) How a thermal boundary gets its geometry. When a boundary and its thematic
+        surface coincide, the spec allows an XLink to the thematic LoD2 geometry. All
+        three legal forms are used:
+          tb_wall_south : PROPERTY-level XLink (its lod2MultiSurface element is empty)
+          tb_wall_east  : MEMBER-level XLink (own MultiSurface; its surfaceMember
+                          XLinks the thematic polygon)
+          tb_ground, tb_roof, tb_wall_north, tb_wall_west : own inline geometry
+    (B) Detailed layers with deliberate gaps and non-SI units: every value the file
+        gives is kept (converted when needed) and only a missing field is defaulted.
+          converted : wall plaster thickness 1.5 cm -> 0.015 m
+                      wall brick density 1.8 g/cm^3 -> 1800 kg/m3
+                      wall insulation specific heat 1.03 kJ/(kg*K) -> 1030 J/(kg-K)
+          defaulted : wall plaster, no specificHeatCapacity -> 900 J/(kg-K)
+                      wall insulation, no density -> 1000 kg/m3
+                      roof insulation, no thermalConductivity -> 1.0 W/(m-K)
+          complete  : wall brick, roof plasterboard, ground screed, ground concrete
+          gas layer : roof air gap, nrg3:Gas with its rValue -> Material:AirGap
+        Layer order: "the order of the layers follows the direction of the normal
+        vector of the surface" (spec, LayeredConstruction). With outward normals the
+        file lists the layers inside -> outside; EnergyPlus wants the outside layer
+        first, so the IDF wall starts with the BRICK and ends with the PLASTER.
 
   TEST AIM
     1. XSD gate passes (CityGML 2.0 + Energy ADE 3.0 beta7).
-    2. Path = ENERGY_ADE_BOUNDARIES, with exactly 6 surfaces (no double-count of
-       the thematic shell).
-    3. ALL THREE geometry-reference forms resolve: every one of the 6 boundaries
-       yields a real polygon with the area listed above. A silently DROPPED
-       surface (5 faces instead of 6) is the failure mode we are hunting.
-    4. Constructions come from the BOUNDARIES and are TIER 1 (citygml_layers),
-       never DEFAULT_CONSTRUCTION and never Tier 2.
-    5. Per-field resolution: the 3 conversions above are applied, the 3 missing
-       fields are defaulted, and the control materials keep their real values.
-    6. IDF layer order is reversed (outside-first).
-    7. relationType="correspondsTo" does NOT turn the north wall Adiabatic.
-    8. ZERO windows in the IDF.
-    9. EnergyPlus exit 0, 0 Severe / 0 Fatal. (Unlike case 1.1 this model HAS
-       thermal mass, so the "no thermal mass" warning must NOT appear.)
+    2. Exactly 6 surfaces, from the thermal boundaries (not the shell).
+    3. All three geometry forms give a real polygon with the area above.
+    4. Constructions come from the boundaries (detailed layers), never the default.
+    5. The 3 conversions are applied, the 3 missing fields are defaulted and the
+       complete materials keep their values.
+    6. The IDF layer order is outside first.
+    7. Zero windows; ZoneInfiltration 0.3 ACH.
+    8. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings.
 -->
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
                 xmlns:bldg="http://www.opengis.net/citygml/building/2.0"
@@ -383,7 +348,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 
@@ -481,20 +446,11 @@
 						</bldg:WallSurface>
 					</nrg3:thermalBoundary>
 
-					<!-- ==== tb wall NORTH: OWN INLINE GEOMETRY + RelationToCityObject ====
-					     relationType = "correspondsTo" says "I am the same wall as that
-					     thematic surface". It is NOT an adjacency: this wall must stay
-					     Outdoors. adjacency.py acts only on relationType = "adjacent". -->
+					<!-- ==== tb wall NORTH: OWN INLINE GEOMETRY ==== -->
 					<nrg3:thermalBoundary>
 						<bldg:WallSurface gml:id="Case21_tb_wall_north">
-							<gml:name>Thermal boundary wall north (own geometry + correspondsTo relation)</gml:name>
+							<gml:name>Thermal boundary wall north (own geometry)</gml:name>
 							<nrg3:layeredConstruction xlink:href="#Case21_constr_wall"/>
-							<nrg3:relatedTo>
-								<nrg3:CityObjectRelation>
-									<nrg3:relationType codeSpace="relation_codeSpace">correspondsTo</nrg3:relationType>
-									<nrg3:relatedTo xlink:href="#Case21_ws_wall_north"/>
-								</nrg3:CityObjectRelation>
-							</nrg3:relatedTo>
 							<bldg:lod2MultiSurface>
 								<gml:MultiSurface srsName="EPSG:28992" srsDimension="3">
 									<gml:surfaceMember>

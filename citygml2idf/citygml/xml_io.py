@@ -50,6 +50,20 @@ NS = {
 XLINK_HREF = f"{{{NS['xlink']}}}href"
 GML_ID = f"{{{NS['gml']}}}id"
 
+# Every object we turn into an EnergyPlus name or look up by gml:id. gml:id is OPTIONAL
+# (gmlBase.xsd AbstractGMLType: use="optional"), so a valid file may leave it out; such an object
+# gets a generated id when the file is loaded (CityGMLDoc._index_by_id).
+# The lists are the XSD substitution groups: bldg:_BoundarySurface (9) + the 4 Energy ADE
+# surfaces, bldg:_Opening, nrg3:AbstractLayeredConstruction, nrg3:AbstractMaterial, + holders.
+NAMED_OBJECTS = frozenset({
+    "Building", "ThermalZone", "Polygon",
+    "WallSurface", "RoofSurface", "GroundSurface", "ClosureSurface", "FloorSurface",
+    "OuterFloorSurface", "InteriorWallSurface", "CeilingSurface", "OuterCeilingSurface",
+    "PartyWallSurface", "IntermediateFloorSurface", "AtticFloorSurface", "BasementCeilingSurface",
+    "Window", "Door",
+    "LayeredConstruction", "ReverseLayeredConstruction", "Layer", "SolidMaterial", "Gas",
+})
+
 # WHY: resolve data paths relative to the PACKAGE root (citygml2idf/), not this
 # file's folder — this module lives one level down in citygml/, while input/,
 # output/ and validation_file/ sit at the package root. Computing _PKG keeps the
@@ -103,12 +117,40 @@ class CityGMLDoc:
         return ns
 
     def _index_by_id(self):
-        #  build the xlink registry once
+        """Build the gml:id -> element registry once, generating the ids a file leaves out.
+
+        Returns
+        -------
+        dict
+            gml:id -> element, for the file's own ids and the generated ones.
+
+        Notes
+        -----
+        gml:id is optional (gmlBase.xsd AbstractGMLType), so a VALID file may have an object
+        without one. Each NAMED_OBJECTS element without an id gets
+        `<nearest ancestor gml:id>_<local name>_<n>` (n = 1, 2, ... in file order), e.g.
+        `Case11_solid_Polygon_1`. It is set on the in-memory element only (the file is never
+        changed), the same file always gives the same names, and every lookup and EnergyPlus
+        name downstream works as for a real id. No warning: a missing id is valid input.
+        """
         idx = {}
-        for el in self.root.iter():
+        for el in self.root.iter(tag=etree.Element):              # the file's own ids
             gid = el.get(GML_ID)
             if gid is not None:
                 idx[gid] = el
+        counts = {}
+        for el in self.root.iter(tag=etree.Element):              # file order: parents first
+            if el.get(GML_ID) is not None or local_name(el) not in NAMED_OBJECTS:
+                continue
+            parent_id = next((a.get(GML_ID) for a in el.iterancestors() if a.get(GML_ID)),
+                             local_name(self.root))
+            key = (parent_id, local_name(el))
+            gid = None
+            while gid is None or gid in idx:                      # never reuse a file's own id
+                counts[key] = counts.get(key, 0) + 1
+                gid = f"{parent_id}_{local_name(el)}_{counts[key]}"
+            el.set(GML_ID, gid)
+            idx[gid] = el
         return idx
 
     # --- lookups -----------------------------------------------------------
@@ -191,37 +233,89 @@ def srs_name(doc):
             return s
     return None
 
-# Interior-ring policy:
-# CityGML/GML polygons may have interior rings for holes/openings. EnergyPlus
-# BuildingSurface:Detailed has no hole field; holes are represented by separate
-# FenestrationSurface:Detailed objects. So geometry reads the exterior ring here,
-# and openings.py writes explicit windows later when enabled.
-def read_pos_list(doc, geom_el):
-    """Parse the first gml:posList under `geom_el` into [(x, y, z), ...].
+# === geometry: ONE reader for every building surface, LoD1 solid and window ===
+# Interior rings (holes) are not read: EnergyPlus BuildingSurface:Detailed has no hole field;
+# openings are written as their own FenestrationSurface:Detailed objects.
+def _point(values):
+    """(x, y, z) from 2 or 3 numbers (z = 0.0 for 2D data)."""
+    return (values[0], values[1], values[2] if len(values) >= 3 else 0.0)
 
-    Honours srsDimension (2 or 3; pads z=0.0 when the data is 2D). Returns the
-    ring exactly as written (still closed: last point == first). Interior rings
-    (holes) are out of scope for now — we take the exterior ring only.
+
+def read_ring(doc, polygon):
+    """The exterior ring of ONE gml:Polygon as [(x, y, z), ...], exactly as written.
+
+    Parameters
+    ----------
+    doc : CityGMLDoc
+        The parsed CityGML file.
+    polygon : lxml element
+        A gml:Polygon.
+
+    Returns
+    -------
+    list of tuple
+        The points (closing point kept); [] with a warning when the ring cannot be read.
+
+    Notes
+    -----
+    GML 3.1.1 LinearRingType: posList, or a sequence of pos / pointProperty / pointRep, or
+    coordinates, or coord. We read posList and pos only; the others warn
+    "not supported yet". posList honours srsDimension (default 3; 2 -> z = 0.0).
     """
-    pl = geom_el.find(f".//{doc.qualified_name('gml', 'posList')}")
-    if pl is None:
-        # A MultiSurface may carry only <gml:surfaceMember xlink:href="#polygon">.
-        # Follow the first member to the real polygon, then parse its posList.
-        for member in geom_el.findall(f".//{doc.qualified_name('gml', 'surfaceMember')}"):
-            target = doc.property_object(member)
-            if target is not None:
-                return read_pos_list(doc, target)
+    exterior = doc.children(polygon, "gml", "exterior")
+    ring = doc.children(exterior[0], "gml", "LinearRing") if exterior else []
+    if not ring:
+        warn(f"polygon {polygon.get(GML_ID)}: no gml:exterior/gml:LinearRing; not supported yet")
         return []
-    if not (pl.text and pl.text.strip()):
+    pos_list = doc.children(ring[0], "gml", "posList")
+    if pos_list:
+        dim = int(pos_list[0].get("srsDimension", 3))
+        nums = [float(v) for v in (pos_list[0].text or "").split()]
+        return [_point(nums[i:i + dim]) for i in range(0, len(nums) - dim + 1, dim)]
+    positions = doc.children(ring[0], "gml", "pos")
+    if positions:
+        return [_point([float(v) for v in (p.text or "").split()]) for p in positions]
+    written_as = sorted({local_name(c) for c in ring[0] if isinstance(c.tag, str)})
+    warn(f"polygon {polygon.get(GML_ID)}: ring written as {written_as}; not supported yet "
+         f"(only gml:posList or gml:pos)")
+    return []
+
+
+def surface_polygons(doc, geometry):
+    """Every gml:Polygon of one surface geometry, with its exterior ring, in file order.
+
+    Parameters
+    ----------
+    doc : CityGMLDoc
+        The parsed CityGML file.
+    geometry : lxml element
+        A gml:Polygon, MultiSurface, CompositeSurface or Solid.
+
+    Returns
+    -------
+    list of (lxml element, list of tuple)
+        (polygon, ring) pairs; a ring is [] when it cannot be read (read_ring warned).
+
+    Notes
+    -----
+    GML 3.1.1: MultiSurface / CompositeSurface -> surfaceMember (or the surfaceMembers array);
+    Solid -> exterior. Every member is opened with property_object, so inline AND xlink work at
+    every level. Any other geometry (e.g. OrientableSurface) warns "not supported yet".
+    """
+    kind = local_name(geometry)
+    if kind == "Polygon":
+        return [(geometry, read_ring(doc, geometry))]
+    if kind in ("MultiSurface", "CompositeSurface"):
+        members = [doc.property_object(m) for m in doc.children(geometry, "gml", "surfaceMember")]
+        for array in doc.children(geometry, "gml", "surfaceMembers"):
+            members.extend(child for child in array if isinstance(child.tag, str))
+    elif kind == "Solid":
+        members = [doc.property_object(e) for e in doc.children(geometry, "gml", "exterior")]
+    else:
+        warn(f"gml:{kind}: not supported yet")
         return []
-    dim = int(pl.get("srsDimension", 3))
-    nums = [float(v) for v in pl.text.split()]
-    pts = []
-    for i in range(0, len(nums) - dim + 1, dim):
-        x, y = nums[i], nums[i + 1]
-        z = nums[i + 2] if dim >= 3 else 0.0
-        pts.append((x, y, z))
-    return pts
+    return [pair for member in members if member is not None
+            for pair in surface_polygons(doc, member)]
 
 
 # === optional XSD validation gate ===========================================
@@ -314,11 +408,12 @@ def _demo(path=None):
         print(f"  - {bid:<12} geom={lods or ['(none)']}  "
               f"boundedBy={n_bounded}  thermalZones={n_zones}")
 
-    # Prove xlink resolution + posList parsing on the first referenced surface.
+    # Prove xlink resolution + ring reading on the first referenced surface.
     for sm in doc.iter_type("gml", "surfaceMember"):
         if sm.get(XLINK_HREF):
             target = doc.resolve_xlink(sm)
-            pts = read_pos_list(doc, target) if target is not None else []
+            pairs = surface_polygons(doc, target) if target is not None else []
+            pts = pairs[0][1] if pairs else []
             print(f"xlink demo        : {sm.get(XLINK_HREF)} -> "
                   f"<{local_name(target)} id={target.get(GML_ID)}>, "
                   f"{len(pts)} pts, first={pts[0] if pts else None}")

@@ -87,7 +87,7 @@ class Surface:
     boundary_object: str = ""                           # A7 partner surface name (interzone pair), else ""
     # --- schema-native adjacency FACTS (model/adjacency.py); zones.py turns them into a boundary ---
     is_adiabatic: Optional[bool] = None                 # nrg3:bdgBdrySurfIsAdiabatic (None = file is silent)
-    adjacent_ids: list = field(default_factory=list)    # relatedTo/CityObjectRelation[adjacent] target gml:ids
+    adjacent_ids: list = field(default_factory=list)    # relatedTo/CityObjectRelation[adjacentTo] target gml:ids
     windows: list = field(default_factory=list)         # list[Window]
     construction_context_ids: list = field(default_factory=list)   # zone/building ids for construction fallback
     provenance: dict = field(default_factory=dict)      # field -> "what we did" (one line)
@@ -95,7 +95,7 @@ class Surface:
 
 @dataclass
 class Zone:
-    """One E+ Zone (one per nrg3:ThermalZone, or one implicit building zone)."""
+    """One E+ Zone (one per nrg3:ThermalZone)"""
     name: str
     infiltration_ach: Optional[float] = None   # nrg3:infiltrationRate in 1/h; None = file silent
     provenance: dict = field(default_factory=dict)
@@ -115,8 +115,8 @@ class WindowConstruction:
 @dataclass
 class Building:
     """One building -> one IDF: its zones + envelope surfaces (+ audit metadata).
-    A building with no `surfaces` (e.g. LoD0 footprint only) stays here for the audit
-    trail but is skipped by the writer."""
+    A building with no `surfaces` (no readable surface, or dropped by model/zones.py) stays
+    here for the audit trail but is skipped by the writer; `provenance["skipped"]` says why."""
     id: str
     zones: list = field(default_factory=list)            # list[Zone]
     surfaces: list = field(default_factory=list)         # list[Surface]

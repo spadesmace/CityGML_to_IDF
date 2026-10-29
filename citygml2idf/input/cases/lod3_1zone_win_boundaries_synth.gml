@@ -1,73 +1,55 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================================
-  Energy ADE 3.0 - LoD3, SINGLE thermal zone, thermal boundaries WITH openings
-  (the LoD3 analogue of case 2.1; case 6.1 is the coincidesWithLod3Hull variant)
+  SUPPORT SAMPLE (not a Table-2 case): LoD3, single thermal zone, thermal
+  boundaries WITH openings. Case 6.1 is the same building written with
+  coincidesWithLod3Hull instead of thermal boundaries.
   SYNTHETIC, self-contained (every reference resolves inside this file).
   ============================================================================
 
-  PARSE PATH (the PREDICTION this sample tests)
-    geometry  : SurfacePath.ENERGY_ADE_BOUNDARIES  (6 thermal boundaries)
-    physics   : per-surface nrg3:layeredConstruction -> TIER 1 detailed layers.
-    openings  : LoD3 EXPLICIT geometry. openings.py branch A:
-                wall -> bldg:opening -> bldg:Window -> bldg:lod3MultiSurface.
-                NOT the LoD2 ratio branches (no bdgBdrySurf* ratio/area here).
-    glazing   : each window's OWN nrg3:layeredConstruction -> uValue -> U-Factor,
-                gValue -> SHGC, visible transmittance -> Visible Transmittance,
-                emitted as E+ WindowMaterial:SimpleGlazingSystem.
-    zoning    : one nrg3:ThermalZone owning all 6 boundaries.
+  PARSE PATH (what the reader must do with this file)
+    geometry      : the 6 nrg3:thermalBoundary surfaces (bldg:lod3MultiSurface).
+    zones         : one ThermalZone owning its 6 boundaries.
+    constructions : detailed layers per boundary.
+    windows       : from each boundary wall's own bldg:Window objects. In LoD3 windows
+                    come only from opening objects, never from a ratio (this file has
+                    no ratio or area attributes).
+    glazing       : the window's own LayeredConstruction: uValue -> U-Factor,
+                    gValue -> SHGC, visible transmittance -> Visible Transmittance.
+    infiltration  : 0.3 1/h -> ZoneInfiltration 0.3 ACH.
 
-  GEOMETRY - the usual 10 (x) x 8 (y) x 3 (z) box. Faces CCW seen from OUTSIDE.
-    ground z=0  80 m2 | roof z=3  80 m2
-    south  y=0  30 m2 | north y=8  30 m2 | east x=10  24 m2 | west x=0  24 m2
+  GEOMETRY
+  A 10 (x) x 8 (y) x 3 (z) box at the origin; every face counter-clockwise seen
+  from outside (its normal points out).
+    ground z=0   80 m2  |  roof  z=3   80 m2
+    south  y=0   30 m2  |  north y=8   30 m2  |  east x=10  24 m2  |  west x=0  24 m2
+  Total envelope 268 m2; zone volume 240 m3 (= the stated nrg3:volume).
+  In LoD3 a surface carries the HOLE and the opening FILLS it: each wall with an
+  opening has a gml:interior ring, and the window ring is that hole REVERSED (GML3
+  winds a hole opposite to its surface, while the window is its own surface facing
+  outdoors like the wall). Wall areas stay GROSS (south 30 m2, not 27).
 
-    In LoD3 the spec REQUIRES the thematic surface to carry the HOLE and the
-    opening geometry to FILL it. So the walls that have an opening carry a
-    gml:interior ring, and the bldg:Window/bldg:Door polygon matches it exactly.
-
-    WALL AREAS STAY GROSS. read_pos_list takes the EXTERIOR ring only, so a wall
-    with a hole still measures its full area (south = 30 m2, not 27 m2). That is
-    what EnergyPlus wants: the base surface is the whole wall and E+ subtracts the
-    fenestration itself. This sample is the FIRST test of a polygon with a hole.
-
-  THE OPENINGS
-    south  window 2.0 x 1.5 = 3.00 m2, x 4..6, z 1..2.5
-           HAS its own glazing construction (uValue 1.4, gValue 0.6,
-           visible transmittance 0.75, solar transmittance 0.55).
-           The solar band is present ON PURPOSE: gValue must WIN over it
-           (the SHGC waterfall is gValue -> solar transmittance -> default),
-           so the IDF must show SHGC = 0.6, never 0.55.
-           WOUND CORRECTLY: its normal agrees with the wall's (-Y).
-    east   window 1.2 x 1.2 = 1.44 m2, y 3.4..4.6, z 0.9..2.1
-           NO construction -> must fall back to DEFAULT_WINDOW (U 2.8, SHGC 0.7,
-           visible transmittance OMITTED - IDD N3 is optional).
-           *** WOUND BACKWARDS ON PURPOSE ***  Its vertices run the other way, so
-           its normal points -X (INTO the room) while its wall points +X (outdoors).
-           WHY: walls are re-oriented outward by rings.orient_outward, but
-           openings.explicit_windows takes the window ring EXACTLY AS WRITTEN. The
-           writer declares GlobalGeometryRules Vertex_Entry_Direction =
-           Counterclockwise ("surfaces are specified as viewed from OUTSIDE the
-           surface" - IDD), so a backwards window BREAKS that promise. Nothing in
-           the CityGML schema forces a winding, so a real file may do this.
-           This sample MEASURES what EnergyPlus does about it, and then proves the
-           fix: a window must face the same way as the wall it sits in.
-    north  a bldg:DOOR (1.0 x 2.1). Doors are SKIPPED -> the hole stays opaque
-           wall, and NO fenestration is emitted for it.
+  ENERGY ADE CONTENT
+    * One ThermalZone (hull flags false) with 6 thermal boundaries, each with its own
+      detailed construction.
+    * The openings:
+    south  bldg:Window 2.0 x 1.5 = 3.00 m2 with its own glazing construction
+           (uValue 1.4, gValue 0.6, visible transmittance 0.75, solar 0.55). The
+           gValue must win over the solar transmittance, so SHGC = 0.6.
+    east   bldg:Window 1.2 x 1.2 = 1.44 m2 with no construction -> default glazing
+           (U 2.8, SHGC 0.7, no visible transmittance: the IDD field is optional).
+    north  bldg:Door: doors are not written yet, so the wall stays opaque there.
     west   no opening (control).
 
   TEST AIM
     1. XSD gate passes (CityGML 2.0 + Energy ADE 3.0 beta7).
-    2. Path = ENERGY_ADE_BOUNDARIES, 6 surfaces, wall areas GROSS (south = 30 m2).
-    3. EXACTLY 2 FenestrationSurface:Detailed (the door is skipped, not 3).
-    4. Window areas exactly 3.0 and 1.44 m2, computed from the vertices.
-    5. South glazing: U=1.4, SHGC=0.6 (gValue BEATS the 0.55 solar band), VT=0.75.
-       East  glazing: DEFAULT_WINDOW U=2.8, SHGC=0.7, VT omitted.
-    6. Each window's Building_Surface_Name is its CORRECT parent wall.
-    7. Both windows end up with the SAME outward normal as their wall (this is the
-       assertion that fails before the winding fix).
-    8. EnergyPlus exit 0, 0 Severe / 0 Fatal. A window that is not exactly in the
-       plane of its parent wall, or not inside its outline, is a SEVERE in E+ - so
-       passing proves the opening really does fill the hole.
+    2. 6 surfaces, gross wall areas (south = 30 m2).
+    3. Exactly 2 windows (3.00 and 1.44 m2), each on its correct wall, facing like it
+       straight from the file (no "re-wound" warning).
+    4. South glazing U 1.4 / SHGC 0.6 (gValue beats the 0.55 solar band) / VT 0.75;
+       east = the default glazing, VT omitted.
+    5. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings. A window outside its wall
+       would give the warning "Base surface does not surround subsurface".
 -->
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
                 xmlns:bldg="http://www.opengis.net/citygml/building/2.0"
@@ -234,7 +216,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 
@@ -344,13 +326,13 @@
 							</bldg:lod3MultiSurface>
 							<bldg:opening>
 								<bldg:Window gml:id="L3_win_east">
-									<gml:name>East window 1.2 x 1.2 (vertices run the WRONG way)</gml:name>
+									<gml:name>East window 1.2 x 1.2</gml:name>
 									<bldg:lod3MultiSurface>
 										<gml:MultiSurface srsName="EPSG:28992" srsDimension="3">
 											<gml:surfaceMember>
 												<gml:Polygon gml:id="L3_poly_win_east">
 													<gml:exterior><gml:LinearRing>
-														<gml:posList>10 3.4 0.9  10 3.4 2.1  10 4.6 2.1  10 4.6 0.9  10 3.4 0.9</gml:posList>
+														<gml:posList>10 3.4 0.9  10 4.6 0.9  10 4.6 2.1  10 3.4 2.1  10 3.4 0.9</gml:posList>
 													</gml:LinearRing></gml:exterior>
 												</gml:Polygon>
 											</gml:surfaceMember>

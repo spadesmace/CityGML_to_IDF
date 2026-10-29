@@ -1,51 +1,34 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================================
-  SUPPORT SAMPLE (not an Energy ADE Table-2 case) - the INSULATED-FLOOR TWIN of
+  SUPPORT SAMPLE (not a Table-2 case): the INSULATED-FLOOR twin of
   case6.1_lod3_1zone_hull_win_SpecificationADE.gml.
   SYNTHETIC, self-contained (every reference resolves inside this file).
   ============================================================================
 
-  WHY THIS FILE EXISTS
-    Case 6.1 is internally INCONSISTENT as a building: it has passive-house walls
-    (U 0.26) and roof (U 0.19) sitting on a BARE CONCRETE SLAB (U 2.84, no
-    insulation at all). No real building is built that way. Measured on the
-    coldest week, that bare slab conducts +1089 W INTO the room - the equivalent
-    of a 1 kW heater running continuously - because EnergyPlus holds the soil
-    beneath it at a constant 18 C.
-    This file makes the building consistent by insulating the floor too, which
-    turns off that heat source.
+  PARSE PATH
+    The same as case 6.1: 6 thematic surfaces, hull zoning, 2 windows, 0.3 ACH. Only
+    the ground construction differs (3 layers instead of 2).
 
-  WHAT WAS CHANGED - and only this
-    * ONE extra nrg3:layer appended to Case61_constr_ground: 80 mm of insulation
-      (k = 0.035 W/mK, rho 30, cp 1030), as a new nrg3:Layer with its own inline
-      nrg3:SolidMaterial. Appended LAST because ADE layer order is inside->outside,
-      so the insulation sits UNDER the slab: the concrete keeps its thermal mass
-      coupled to the room, and only the path to the soil is throttled.
-    * bldg:Building gml:id -> Case61_InsulatedGround, so run.py writes a SEPARATE
-      output/runs/ folder. Every OTHER gml:id is UNCHANGED.
+  GEOMETRY
+    Unchanged: the 10 x 8 x 3 box of case 6.1.
 
-  WHAT WAS DELIBERATELY *NOT* CHANGED
-    Walls, roof, windows, infiltration, geometry, zoning. This isolates the floor.
-
-  PREDICTION (hand calculation, steady state, no sun, outdoor air -10 C)
-                                  case 6.1        this file
-      wall / roof U (unchanged)    0.26 / 0.19    0.26 / 0.19  W/m2K
-      ground U with films           2.84            0.38   W/m2K
-      envelope loss to outdoor      72.6            72.6   W/K   <- unchanged
-      ground gain path (18 C)      227.4            30.3   W/K   <- the heater is off
-      room settles at              11.2            -1.7    C
-    (EnergyPlus reports Constructions.Uvalue WITHOUT surface films: expect ~0.41.)
-
-  COUNTER-INTUITIVE, AND THE POINT OF THE TEST
-    ADDING insulation makes this building COLDER. Insulation never creates heat -
-    it only slows exchange. The 18 C soil is the ONLY heat source in a free-float
-    model with no heating, no people and no lights, so insulating the floor cuts
-    that source off and the room falls toward outdoor air.
+  ENERGY ADE CONTENT (what differs from case 6.1, and nothing else)
+    * One extra nrg3:layer appended to Case61_constr_ground: 0.08 m of insulation
+      (thermalConductivity 0.035 W/(m*K), density 30 kg/m^3) as an inline
+      nrg3:SolidMaterial. It is appended LAST: the layers follow the floor's normal,
+      which points down out of the room, so the insulation sits UNDER the concrete
+      slab, between the slab and the soil.
+    * bldg:Building gml:id = Case61_InsulatedGround (its own output folder). Every
+      other gml:id is the same as in case 6.1, so the runs pair up surface by surface.
 
   TEST AIM
-    Show that the bare slab - not the good walls - is what was holding case 6.1 at
-    12 C. Envelope AREAS, window area and ACH must stay IDENTICAL to case 6.1.
+    1. XSD gate passes; the IDF equals case 6.1 except the ground construction (one
+       more layer and material).
+    2. Envelope areas, window areas and ACH are identical to case 6.1.
+    3. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings.
+    4. Purpose: compared with case 6.1, show how much of the zone's warmth comes from
+       the ground under a bare slab (the writer holds the ground at 18 C).
 -->
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
                 xmlns:bldg="http://www.opengis.net/citygml/building/2.0"
@@ -405,7 +388,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 

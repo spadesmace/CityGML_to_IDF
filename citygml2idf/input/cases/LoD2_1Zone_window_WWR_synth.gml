@@ -1,15 +1,46 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  CASE — LoD2, single thermal zone, WITH windows (via WWR), DETAILED-LAYER constructions.
-   Each WALL carries nrg3:bdgBdrySurfOpeningToSurfaceRatio
-   SYNTHESIZES a window 
-  Constructions are DETAILED LAYERS with real nrg3:SolidMaterial (+ one nrg3:Gas air gap), so the
-  zone has THERMAL MASS -> stable with windows. Some SolidMaterial fields are DELIBERATELY left out
-  (wall insulation: NO density; wall plaster: NO specificHeat; roof insulation: NO conductivity) to
-  exercise PER-FIELD DEFAULTING: the parser keeps every real value and defaults ONLY the missing one.
+  ============================================================================
+  SUPPORT SAMPLE (not a Table-2 case): LoD2, single thermal zone, windows from the
+  OPENING RATIO, detailed-layer constructions with missing fields.
+  SYNTHETIC, self-contained (every reference resolves inside this file).
+  ============================================================================
+
+  PARSE PATH (what the reader must do with this file)
+    geometry      : the 6 nrg3:thermalBoundary surfaces (there is no thematic shell).
+    zones         : one ThermalZone owning its 6 boundaries.
+    constructions : detailed layers (SolidMaterial + one Gas air gap). Three fields are
+                    missing on purpose and get the default; every given value is kept.
+    windows       : each wall states nrg3:bdgBdrySurfOpeningToSurfaceRatio 0.3, so each
+                    gets ONE centred window of 0.3 x 30 = 9.0 m2 (the wall shrunk about
+                    its centre) with the default glazing (U 2.8, SHGC 0.7). LoD2 has no
+                    opening objects, so the ratio is the window source.
+    infiltration  : nrg3:infiltrationRate 0.3 1/h -> ZoneInfiltration 0.3 ACH.
+
+  GEOMETRY
+    A 10 (x) x 10 (y) x 3 (z) box; every face counter-clockwise seen from outside.
+      ground 100 m2  |  roof 100 m2  |  4 walls of 10 x 3 = 30 m2
+    Zone volume 300 m3 (= the stated nrg3:volume).
+
+  ENERGY ADE CONTENT
+    * One ThermalZone (hull flags false, optional zone lod2Solid) with 6 thermal
+      boundaries, each XLinking its construction.
+    * nrg3:bdgBdrySurfOpeningToSurfaceRatio 0.3 (uom "unit interval") on every wall.
+    * Missing fields, each in a different material so they cannot hide each other:
+        wall insulation : no density
+        wall plaster    : no specificHeatCapacity
+        roof insulation : no thermalConductivity
+    * Roof air gap: nrg3:Gas with rValue 0.15 m^2*K/W.
+
+  TEST AIM
+    1. XSD gate passes (CityGML 2.0 + Energy ADE 3.0 beta7).
+    2. 6 surfaces; 4 windows of 9.0 m2, one per wall, centred and facing like the wall.
+    3. The given material values are kept; only the 3 missing fields are defaulted.
+    4. ZoneInfiltration 0.3 ACH, taken from the file.
+    5. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings.
 -->
 <core:CityModel xmlns:app="http://www.opengis.net/citygml/appearance/2.0" xmlns:bldg="http://www.opengis.net/citygml/building/2.0" xmlns:brid="http://www.opengis.net/citygml/bridge/2.0" xmlns:core="http://www.opengis.net/citygml/2.0" xmlns:dem="http://www.opengis.net/citygml/relief/2.0" xmlns:frn="http://www.opengis.net/citygml/cityfurniture/2.0" xmlns:gen="http://www.opengis.net/citygml/generics/2.0" xmlns:gml="http://www.opengis.net/gml" xmlns:grp="http://www.opengis.net/citygml/cityobjectgroup/2.0" xmlns:luse="http://www.opengis.net/citygml/landuse/2.0" xmlns:nrg3="http://www.citygml.org/ade/energy/3.0" xmlns:pbase="http://www.opengis.net/citygml/profiles/base/2.0" xmlns:tex="http://www.opengis.net/citygml/texturedsurface/2.0" xmlns:tran="http://www.opengis.net/citygml/transportation/2.0" xmlns:tun="http://www.opengis.net/citygml/tunnel/2.0" xmlns:veg="http://www.opengis.net/citygml/vegetation/2.0" xmlns:wtr="http://www.opengis.net/citygml/waterbody/2.0" xmlns:xAL="urn:oasis:names:tc:ciq:xsdschema:xAL:2.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-	<gml:name> TESt - LoD2 single zone, thermal boundaries, WWR windows</gml:name>
+	<gml:name>LoD2 single zone, thermal boundaries, windows from the opening ratio</gml:name>
 	<gml:boundedBy>
 		<gml:Envelope srsName="EPSG:28992" srsDimension="3">
 			<gml:lowerCorner>0 0 0</gml:lowerCorner>
@@ -119,9 +150,10 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">300</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
+					<nrg3:infiltrationRate uom="1/h">0.3</nrg3:infiltrationRate>
 					<nrg3:isCooled>false</nrg3:isCooled>
 					<nrg3:isHeated>true</nrg3:isHeated>
 					<nrg3:coincidesWithLod2Hull>false</nrg3:coincidesWithLod2Hull>
@@ -137,7 +169,7 @@
 									<gml:surfaceMember>
 										<gml:Polygon gml:id="Case22_poly_ground">
 											<gml:exterior><gml:LinearRing>
-												<gml:posList>0 0 0 10 0 0 10 10 0 0 10 0 0 0 0</gml:posList>
+												<gml:posList>0 0 0 0 10 0 10 10 0 10 0 0 0 0 0</gml:posList>
 											</gml:LinearRing></gml:exterior>
 										</gml:Polygon>
 									</gml:surfaceMember>

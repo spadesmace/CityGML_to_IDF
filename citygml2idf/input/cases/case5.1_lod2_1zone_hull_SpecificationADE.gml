@@ -1,71 +1,45 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================================
-  Energy ADE 3.0 — Table 2, SPECIAL CASE 5.1
-  "Single LoD2 thermal zone, no thermal openings. ALL LoD2 thermal boundaries
-   coincide EXACTLY with the building LoD2 thematic surfaces"
+  Energy ADE 3.0, Table 2, SPECIAL CASE 5.1
+  "Single LoD2 thermal zone, no thermal openings. All LoD2 thermal boundaries
+   coincide exactly with the building LoD2 thematic surfaces"
   SYNTHETIC, self-contained (every reference resolves inside this file).
   ============================================================================
 
-  WHAT MAKES 5.1 DIFFERENT FROM 2.1
-    The spec says: when the thermal zone coincides exactly with the hull formed by
-    the union of the LoD2 thematic surfaces, set coincidesWithLod2Hull = TRUE and
-    model NO thermal boundaries at all. The "normal" thematic surfaces are used
-    DIRECTLY in lieu of thermal boundaries, so no duplicate objects exist, and the
-    LayeredConstruction objects hang off the THEMATIC SURFACES instead.
-
-    This file is therefore the SAME BUILDING as case 2.1 — same 10 x 8 x 3 m box,
-    same three detailed constructions — expressed in the other legal style. The
-    IDF must come out THERMALLY IDENTICAL to case 2.1 (same 6 surfaces, same areas,
-    same constructions, same materials); only the surface NAMES differ. That
-    equivalence is the strongest possible check that the path switch is correct.
-
-  PARSE PATH (the PREDICTION this sample tests)
-    geometry  : SurfacePath.CITYGML_BUILDING_SHELL  <- THE SWITCH
-                The zone exposes NO nrg3:thermalBoundary, so select_surface_path()
-                falls through the ADE-boundary rung and reads the bldg:boundedBy
-                thematic surfaces instead. (coincidesWithLodXHull is NOT a separate
-                path — a hull-coincident zone simply has no boundaries to find.)
-    physics   : per-surface — each THEMATIC surface carries its own
-                nrg3:layeredConstruction (xlink) -> TIER 1 (detailed layers).
-    zoning    : zones.py pass 1, ownership source = coincidesWithLodXHull -> the
-                single zone owns the WHOLE SHELL (all 6 surfaces). This is the rung
-                ABOVE the LoD1 whole-hull rule and ABOVE nrg3:thermalBoundary.
-    windows   : NONE -> the IDF must contain ZERO FenestrationSurface:Detailed.
+  PARSE PATH (what the reader must do with this file)
+    geometry      : the 6 bldg:boundedBy thematic surfaces. The zone states
+                    coincidesWithLod2Hull = TRUE and has no thermal boundaries, so the
+                    thematic shell IS the zone's envelope.
+    zones         : one zone; the hull flag makes it own the whole shell (all 6).
+    constructions : each thematic surface carries its own detailed LayeredConstruction.
+    windows       : none.
+    infiltration  : 0.3 1/h -> ZoneInfiltration 0.3 ACH.
 
   GEOMETRY
-    The same 10 (x) x 8 (y) x 3 (z) box as cases 1.1 and 2.1. CCW seen from OUTSIDE.
-      ground z=0   80 m2  |  roof z=3   80 m2
-      south  y=0   30 m2  |  north y=8  30 m2
-      east   x=10  24 m2  |  west  x=0  24 m2
-    Total envelope = 268 m2.  Zone volume = 240 m3.
+  A 10 (x) x 8 (y) x 3 (z) box at the origin; every face counter-clockwise seen
+  from outside (its normal points out).
+    ground z=0   80 m2  |  roof  z=3   80 m2
+    south  y=0   30 m2  |  north y=8   30 m2  |  east x=10  24 m2  |  west x=0  24 m2
+  Total envelope 268 m2; zone volume 240 m3 (= the stated nrg3:volume).
 
   ENERGY ADE CONTENT
-    * ONE nrg3:ThermalZone with coincidesWithLod2Hull = TRUE.
-    * NO nrg3:thermalBoundary (the spec forbids them in this special case).
-    * The 6 bldg:boundedBy thematic surfaces carry the nrg3:layeredConstruction.
-    * OPTIONAL zone lod2Solid, XLinking the homologous polygons of the thematic
-      surfaces (spec bullet) — must NOT be read as envelope geometry, so it must
-      not produce a 7th..12th surface.
-    * Constructions are byte-for-byte the same three as case 2.1, including the
-      same deliberate gaps and non-SI units, so the two cases can be compared
-      directly:
-        wall  : plaster (1.5 cm; NO cp) | insulation (NO density; cp in kJ) | brick (g/cm3)
-        roof  : plasterboard | nrg3:Gas air gap (rValue) | insulation (NO conductivity)
-        ground: screed | concrete   (both complete)
+    * One ThermalZone with coincidesWithLod2Hull = TRUE.
+    * NO nrg3:thermalBoundary. Table 2: "None the LoD2 thermal boundaries must be
+      modelled. The corresponding building LoD2 thematic surfaces must be used instead".
+    * The 6 thematic surfaces carry the nrg3:layeredConstruction.
+    * An optional zone lod2Solid XLinks the thematic polygons (not read as extra faces).
+    * The same three constructions as case 2.1, with the same gaps and units: the two
+      files describe the SAME building in the two legal styles.
 
   TEST AIM
     1. XSD gate passes (CityGML 2.0 + Energy ADE 3.0 beta7).
-    2. Path SWITCHES to CITYGML_BUILDING_SHELL (not ENERGY_ADE_BOUNDARIES), with
-       exactly 6 surfaces.
-    3. Zone ownership comes from coincidesWithLodXHull and covers all 6 surfaces —
-       NOT the orphan fallback (zero "in no ThermalZone" warnings).
-    4. Constructions resolve from the THEMATIC surfaces (Tier 1, citygml_layers),
-       never DEFAULT_CONSTRUCTION.
-    5. ZERO windows in the IDF.
-    6. The IDF is thermally identical to case 2.1 (6 surfaces, same areas, same 3
-       constructions, same 8 materials).
-    7. EnergyPlus exit 0, 0 Severe / 0 Fatal.
+    2. Exactly 6 surfaces, from the thematic shell; the zone owns all 6.
+    3. Constructions come from the thematic surfaces (detailed layers), never the default.
+    4. Zero windows; ZoneInfiltration 0.3 ACH.
+    5. The IDF is thermally the same as case 2.1 (same areas, constructions and
+       materials); only the names differ.
+    6. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings.
 -->
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
                 xmlns:bldg="http://www.opengis.net/citygml/building/2.0"
@@ -339,7 +313,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 

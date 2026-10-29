@@ -1,70 +1,60 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================================
-  Energy ADE 3.0 - Table 2, SPECIAL CASE 6.1
-  "Single LoD3 thermal zone, with thermal boundaries and thermal openings.
-   ALL LoD3 thermal boundaries/openings coincide EXACTLY with the building LoD3
+  Energy ADE 3.0, Table 2, SPECIAL CASE 6.1
+  "Single LoD3 thermal zone, with thermal boundaries and thermal openings. All
+   LoD3 thermal boundaries/opening coincide exactly with the building LoD3
    thematic surfaces/openings"
   SYNTHETIC, self-contained (every reference resolves inside this file).
   ============================================================================
 
-  WHAT MAKES 6.1 DIFFERENT (spec bullets)
-    * One thermal zone, coincidesWithLod3Hull = TRUE.
-    * NEITHER the LoD3 thermal boundaries NOR the LoD3 thermal openings are
-      modelled: the building's OWN thematic surfaces and their OWN bldg:Window /
-      bldg:Door openings are used instead. Nothing is written twice.
-    * LayeredConstructions (U values AND g values) hang on the BUILDING THEMATIC
-      SURFACES and on the OPENINGS.
-    * The zone may optionally carry a LoD3 solid, XLinking the homologous polygons.
-    It is 5.1 with windows: same idea, one LoD up.
+  PARSE PATH (what the reader must do with this file)
+    geometry      : the 6 bldg:boundedBy thematic surfaces (LoD3). The zone states
+                    coincidesWithLod3Hull = TRUE and has no thermal boundaries, so the
+                    thematic shell IS the zone's envelope.
+    zones         : one zone owning the whole shell through the hull flag.
+    constructions : each thematic surface carries its own detailed LayeredConstruction.
+    windows       : from the walls' own bldg:Window objects. In LoD3 windows come only
+                    from opening objects, never from a ratio.
+    glazing       : the window's own LayeredConstruction: uValue -> U-Factor,
+                    gValue -> SHGC, visible transmittance -> Visible Transmittance.
+    infiltration  : 0.3 1/h -> ZoneInfiltration 0.3 ACH.
 
-    This file is DELIBERATELY the SAME BUILDING as
-    `lod3_1zone_win_boundaries_synth.gml` (same box, same openings, same
-    constructions), written in the other legal style. The IDF must therefore come
-    out EQUIVALENT - same 6 surfaces, same 2 windows, same glazing - exactly as
-    case 5.1 came out equivalent to case 2.1. That equivalence IS the test.
+  GEOMETRY
+  A 10 (x) x 8 (y) x 3 (z) box at the origin; every face counter-clockwise seen
+  from outside (its normal points out).
+    ground z=0   80 m2  |  roof  z=3   80 m2
+    south  y=0   30 m2  |  north y=8   30 m2  |  east x=10  24 m2  |  west x=0  24 m2
+  Total envelope 268 m2; zone volume 240 m3 (= the stated nrg3:volume).
+  A wall with an opening carries a gml:interior hole, and the opening's ring fills it
+  (the hole REVERSED: GML3 winds a hole opposite to its surface, while the window is
+  its own surface facing outdoors). Wall areas stay GROSS (south 30 m2, not 27):
+  EnergyPlus subtracts the windows itself.
 
-  PARSE PATH (the PREDICTION this sample tests)
-    geometry  : SurfacePath.CITYGML_BUILDING_SHELL   <- THE SWITCH
-                The zone exposes NO nrg3:thermalBoundary, so select_surface_path()
-                falls through the ADE rung and reads bldg:boundedBy instead.
-                (coincidesWithLodXHull is NOT its own path - a hull zone simply has
-                no boundaries to find.)
-    physics   : each THEMATIC surface carries its own nrg3:layeredConstruction
-                -> TIER 1 detailed layers.
-    openings  : openings.py branch A, unchanged - it walks WHATEVER wall surface it
-                was given -> bldg:opening -> bldg:Window. Here that wall IS the
-                thematic wall, which is where the windows live anyway.
-    glazing   : the WINDOW's own nrg3:layeredConstruction -> uValue -> U-Factor,
-                gValue -> SHGC, visible transmittance -> Visible Transmittance.
-    zoning    : ownership source = coincidesWithLodXHull -> the single zone owns the
-                WHOLE shell (all 6 surfaces). NOT the orphan fallback.
-
-  GEOMETRY - the usual 10 (x) x 8 (y) x 3 (z) box. Faces CCW seen from OUTSIDE.
-    ground z=0  80 m2 | roof z=3  80 m2
-    south  y=0  30 m2 | north y=8  30 m2 | east x=10  24 m2 | west x=0  24 m2
-    In LoD3 the thematic surface carries the HOLE and the opening FILLS it. Wall
-    areas stay GROSS (south = 30 m2, not 27): E+ subtracts the fenestration itself.
-
-  THE OPENINGS (identical to the boundaries sample)
-    south  window 2.0 x 1.5 = 3.00 m2, WITH its own glazing construction
-           (uValue 1.4, gValue 0.6, visible transmittance 0.75, solar 0.55).
-           The solar band is present ON PURPOSE: gValue must WIN over it, so the
-           IDF must show SHGC = 0.6, never 0.55.
-    east   window 1.2 x 1.2 = 1.44 m2, NO construction -> DEFAULT_WINDOW
-           (U 2.8, SHGC 0.7, visible transmittance OMITTED - IDD N3 is optional).
-    north  a bldg:DOOR -> SKIPPED, stays opaque wall, no fenestration emitted.
+  ENERGY ADE CONTENT
+    * One ThermalZone with coincidesWithLod3Hull = TRUE; no thermal boundaries and no
+      thermal openings (Table 2: the building's own thematic surfaces and openings
+      are used instead).
+    * An optional zone LoD3 solid XLinks the thematic polygons.
+    * The openings:
+    south  bldg:Window 2.0 x 1.5 = 3.00 m2 with its own glazing construction
+           (uValue 1.4, gValue 0.6, visible transmittance 0.75, solar 0.55). The
+           gValue must win over the solar transmittance, so SHGC = 0.6.
+    east   bldg:Window 1.2 x 1.2 = 1.44 m2 with no construction -> default glazing
+           (U 2.8, SHGC 0.7, no visible transmittance: the IDD field is optional).
+    north  bldg:Door: doors are not written yet, so the wall stays opaque there.
     west   no opening (control).
+    * The same building as lod3_1zone_win_boundaries_synth.gml, written in the other
+      legal style (hull flag instead of thermal boundaries).
 
   TEST AIM
     1. XSD gate passes (CityGML 2.0 + Energy ADE 3.0 beta7).
-    2. Path SWITCHES to CITYGML_BUILDING_SHELL (not ENERGY_ADE_BOUNDARIES), 6 surfaces.
-    3. Zone ownership = coincidesWithLodXHull, owns all 6 - ZERO orphan warnings.
-    4. Windows are still found, now on the THEMATIC walls: exactly 2 (door skipped).
-    5. South glazing U=1.4, SHGC=0.6, VT=0.75. East = DEFAULT_WINDOW, VT omitted.
-    6. Constructions resolve from the THEMATIC surfaces (Tier 1), never DEFAULT.
-    7. The IDF is EQUIVALENT to lod3_1zone_win_boundaries_synth.gml.
-    8. EnergyPlus exit 0, 0 Severe / 0 Fatal.
+    2. Exactly 6 surfaces from the thematic shell; the zone owns all 6.
+    3. Exactly 2 windows (3.00 and 1.44 m2), each on its own wall and facing like it.
+    4. South glazing U 1.4 / SHGC 0.6 / VT 0.75; east = the default glazing.
+    5. Constructions from the thematic surfaces, never the default; 0.3 ACH.
+    6. The IDF is equivalent to lod3_1zone_win_boundaries_synth.gml.
+    7. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings.
 -->
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
                 xmlns:bldg="http://www.opengis.net/citygml/building/2.0"
@@ -411,7 +401,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 

@@ -1,102 +1,73 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================================
-  Energy ADE 3.0 — Table 2, CASE 3.1
-  "MULTIPLE LoD2 thermal zones, no thermal openings, some LoD2 thermal
+  Energy ADE 3.0, Table 2, CASE 3.1
+  "Multiple LoD2 thermal zones, no thermal openings, some LoD2 thermal
    boundaries may have the same geometry of the corresponding building LoD2
    thematic surfaces (and others don't)"
   SYNTHETIC, self-contained (every reference resolves inside this file).
   ============================================================================
 
-  PARSE PATH (the PREDICTION this sample tests)
-    geometry  : SurfacePath.ENERGY_ADE_BOUNDARIES
-                12 thermal boundaries (6 per zone). The bldg:boundedBy thematic
-                shell also exists, so a double-count would give 18 surfaces.
-    physics   : per-surface layeredConstruction, TIER 1 (detailed layers).
-                The INTERMEDIATE FLOOR is the point of this case: ONE physical
-                slab, TWO surfaces, and the second one uses a
-                nrg3:ReverseLayeredConstruction of the first.
-    zoning    : TWO nrg3:ThermalZone objects, each owning its 6 boundaries via
-                nrg3:thermalBoundary. The two slab faces are linked by
-                nrg3:relatedTo (relationType = "adjacent") -> zones.py must emit a
-                RECIPROCAL EnergyPlus pair (Outside_Boundary_Condition = Surface,
-                each naming the other).
-    windows   : NONE -> the IDF must contain ZERO FenestrationSurface:Detailed.
+  PARSE PATH (what the reader must do with this file)
+    geometry      : the 12 thermal boundaries (6 per zone). The thematic shell also
+                    exists and must not be read as well (12 surfaces, not 18).
+    zones         : TWO nrg3:ThermalZone objects (stacked storeys), each owning its 6
+                    boundaries.
+    constructions : detailed layers per boundary. The shared slab: the lower face uses
+                    a LayeredConstruction, the upper face a ReverseLayeredConstruction
+                    of it.
+    shared slab   : the two slab faces point at each other with nrg3:relatedTo,
+                    relationType "adjacentTo" (codelist RelationTypeValue).
+                    Default (fast) run: interior faces are Adiabatic.
+                    With run.py's detailed-interior option: an EnergyPlus Surface pair, each face
+                    naming the other.
+    windows       : none.
+    infiltration  : 0.3 1/h per zone -> 0.3 ACH each.
 
-  GEOMETRY — a 10 (x) x 8 (y) x 6 (z) box cut into two STACKED storeys.
-      LOWER zone  z 0 -> 3      UPPER zone  z 3 -> 6
-      the shared slab sits at z = 3.
-
-      thematic shell (bldg:boundedBy, 6 surfaces, FULL height):
-        ground z=0  80 m2 | roof z=6  80 m2 | walls 10x6=60 / 8x6=48 (x2 each)
+  GEOMETRY
+    A 10 (x) x 8 (y) x 6 (z) box cut into two stacked storeys; every face is
+    counter-clockwise seen from outside ITS OWN zone.
+      LOWER zone z 0 to 3  |  UPPER zone z 3 to 6  |  shared slab at z = 3
+      thematic shell (6 surfaces, full height): ground 80 | roof 80 | walls 60 / 48
       thermal boundaries (12):
-        LOWER: ground 80 | 4 walls (30/24/30/24) | intermediate floor 80
-        UPPER: roof   80 | 4 walls (30/24/30/24) | intermediate floor 80
-      Each zone: floor area 80 m2, volume 240 m3.
+        LOWER: ground 80 | walls 30/24/30/24 | slab 80, normal UP (out of the lower zone)
+        UPPER: roof 80   | walls 30/24/30/24 | slab 80, normal DOWN (out of the upper zone)
+      Each zone: floor area 80 m2, volume 240 m3 (= its stated nrg3:volume).
 
   ENERGY ADE CONTENT
-
-  (A) THE INTERZONE SLAB — one slab, two surfaces, mirrored constructions.
-      EnergyPlus needs TWO real surfaces that NAME EACH OTHER (IDD
-      BuildingSurface:Detailed A7: "If Surface, specify name of corresponding
-      surface in adjacent zone"), so the ADE models both — we never synthesize a
-      twin. Both are nrg3:IntermediateFloorSurface: the SAME ADE label on both
-      faces, which is precisely why the E+ Surface Type cannot come from the name.
-      It must come from the GEOMETRY, per owning zone:
-          LOWER zone: the slab is ABOVE it -> outward normal +Z -> CEILING
-          UPPER zone: the slab is BELOW it -> outward normal -Z -> FLOOR
-      (Both faces lie exactly at the BUILDING centroid's height, so the building
-      centroid cannot orient them — only the OWNING ZONE centroid can. That is
-      the 2026-07-07 fix, and this case is its first purpose-built test.)
-
-  (B) LayeredConstruction vs ReverseLayeredConstruction.
-      The slab build-up is DELIBERATELY ASYMMETRIC, so a wrong order is visibly
-      wrong instead of accidentally symmetric:
-
-          UPPER ROOM
-        ==================  screed        60 mm   (the upper room's floor finish)
-                            concrete     200 mm
-        ==================  ceiling plaster 10 mm (the lower room's ceiling finish)
-          LOWER ROOM
-
-      ADE orders layers "from the inside of the room towards the outside" — and
-      "the room" is whichever room OWNS the surface:
-        LOWER zone's face -> nrg3:LayeredConstruction Case31_constr_ifloor
-                             inside->outside = plaster, concrete, screed (upwards)
-        UPPER zone's face -> nrg3:ReverseLayeredConstruction Case31_constr_ifloor_rev
-                             baseLayeredConstruction xlink -> Case31_constr_ifloor
-                             It carries NO layers of its own: "same slab, other side".
-                             Its inside->outside = screed, concrete, plaster (downwards)
-      The writer then flips BOTH (IDD Construction: "Start with outside layer"),
-      so the two IDF constructions must come out as EXACT MIRRORS:
-        lower face  Outside Layer = screed   (its outside faces UP,   toward UPPER)
-        upper face  Outside Layer = plaster  (its outside faces DOWN, toward LOWER)
-
-  (C) GEOMETRY SHARED WITH THE THEMATIC SURFACES (the 2.1 rules still apply).
-      Only the ground and the roof genuinely coincide with a thematic surface, so
-      only they may XLink it; the eight zone walls are HALF height while the shell
-      walls are full height, so they carry their own geometry ("...and others don't").
-        tb_low_ground : PROPERTY-LEVEL XLINK  <bldg:lod2MultiSurface xlink:href="#..MS_ground"/>
-        tb_up_roof    : MEMBER-LEVEL XLINK    <gml:surfaceMember xlink:href="#..poly_roof"/>
-      tb_low_ground ALSO carries a "correspondsTo" relation to its thematic twin,
-      in the same file as the "adjacent" relations on the slab — proving
-      adjacency.py acts on relationType="adjacent" ONLY and does not confuse the two.
+    (A) One slab, two surfaces. EnergyPlus needs two real surfaces that name each
+        other (IDD BuildingSurface:Detailed, Outside Boundary Condition Object), so
+        the file models both. Both are nrg3:IntermediateFloorSurface, so the E+ type
+        comes from each face's own direction: the lower face points up -> CEILING,
+        the upper face points down -> FLOOR.
+    (B) LayeredConstruction vs ReverseLayeredConstruction, with an asymmetric slab so
+        a wrong order is visible:
+              UPPER ROOM
+            ====  screed     60 mm   (the upper room's floor finish)
+                  concrete  200 mm
+            ====  plaster    10 mm   (the lower room's ceiling finish)
+              LOWER ROOM
+        lower face : LayeredConstruction Case31_constr_ifloor; along its normal (up):
+                     plaster, concrete, screed
+        upper face : ReverseLayeredConstruction Case31_constr_ifloor_rev, no layers of
+                     its own, baseLayeredConstruction -> Case31_constr_ifloor; along its
+                     normal (down): screed, concrete, plaster
+        The two IDF constructions must be exact mirrors: outside layer screed for the
+        lower face, plaster for the upper face.
+    (C) Geometry shared with the thematic surfaces where they coincide:
+          tb_low_ground : PROPERTY-level XLink
+          tb_up_roof    : MEMBER-level XLink
+          the 8 zone walls are half height, so they carry their own geometry.
 
   TEST AIM
     1. XSD gate passes (CityGML 2.0 + Energy ADE 3.0 beta7).
-    2. Path = ENERGY_ADE_BOUNDARIES with exactly 12 surfaces (NOT 18: the thematic
-       shell must not be emitted as well).
-    3. TWO E+ Zones, each owning exactly 6 surfaces (ownership = nrg3:thermalBoundary).
-    4. The slab pair: both Outside_Boundary_Condition = Surface, each naming the
-       OTHER; lower face = Ceiling, upper face = Floor.
-    5. eplusout.eio Zone Floor Area = 80 m2 for EACH zone. (If Floor/Ceiling were
-       resolved from the building centroid instead of the owning zone, the lower
-       zone would report 160 m2 and E+ would warn "unenclosed zone".)
-    6. The two interzone constructions are EXACT MIRRORS in the IDF (screed-first
-       vs plaster-first).
-    7. The 8 exterior walls stay Outdoors; ground = Ground; roof = Outdoors.
-    8. ZERO windows in the IDF.
-    9. EnergyPlus exit 0, 0 Severe / 0 Fatal.
+    2. Exactly 12 surfaces (not 18); two E+ Zones with 6 each.
+    3. Lower slab face = Ceiling, upper = Floor; each zone's floor area = 80 m2.
+    4. With the detailed-interior option both slab faces are Surface, each naming the other;
+       in the default run both are Adiabatic.
+    5. The two slab constructions are exact mirrors in the IDF.
+    6. The 8 walls Outdoors, the ground Ground, the roof Outdoors; zero windows.
+    7. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings.
 -->
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
                 xmlns:bldg="http://www.opengis.net/citygml/building/2.0"
@@ -415,7 +386,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 
@@ -426,19 +397,11 @@
 					<nrg3:coincidesWithLod2Hull>false</nrg3:coincidesWithLod2Hull>
 					<nrg3:coincidesWithLod3Hull>false</nrg3:coincidesWithLod3Hull>
 
-					<!-- ground: PROPERTY-LEVEL XLINK to the thematic ground geometry,
-					     PLUS a "correspondsTo" relation to its thematic twin (must be
-					     ignored by adjacency.py: it is NOT an adjacency). -->
+					<!-- ground: PROPERTY-LEVEL XLINK to the thematic ground geometry. -->
 					<nrg3:thermalBoundary>
 						<bldg:GroundSurface gml:id="Case31_tb_low_ground">
 							<gml:name>Lower zone ground (property-level xlink geometry)</gml:name>
 							<nrg3:layeredConstruction xlink:href="#Case31_constr_ground"/>
-							<nrg3:relatedTo>
-								<nrg3:CityObjectRelation>
-									<nrg3:relationType codeSpace="relation_codeSpace">correspondsTo</nrg3:relationType>
-									<nrg3:relatedTo xlink:href="#Case31_ws_ground"/>
-								</nrg3:CityObjectRelation>
-							</nrg3:relatedTo>
 							<bldg:lod2MultiSurface xlink:href="#Case31_MS_ground"/>
 						</bldg:GroundSurface>
 					</nrg3:thermalBoundary>
@@ -525,7 +488,7 @@
 							<nrg3:layeredConstruction xlink:href="#Case31_constr_ifloor"/>
 							<nrg3:relatedTo>
 								<nrg3:CityObjectRelation>
-									<nrg3:relationType codeSpace="relation_codeSpace">adjacent</nrg3:relationType>
+									<nrg3:relationType codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/RelationTypeValue">adjacentTo</nrg3:relationType>
 									<nrg3:relatedTo xlink:href="#Case31_tb_up_ifloor"/>
 								</nrg3:CityObjectRelation>
 							</nrg3:relatedTo>
@@ -554,7 +517,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 
@@ -574,7 +537,7 @@
 							<nrg3:layeredConstruction xlink:href="#Case31_constr_ifloor_rev"/>
 							<nrg3:relatedTo>
 								<nrg3:CityObjectRelation>
-									<nrg3:relationType codeSpace="relation_codeSpace">adjacent</nrg3:relationType>
+									<nrg3:relationType codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/RelationTypeValue">adjacentTo</nrg3:relationType>
 									<nrg3:relatedTo xlink:href="#Case31_tb_low_ifloor"/>
 								</nrg3:CityObjectRelation>
 							</nrg3:relatedTo>

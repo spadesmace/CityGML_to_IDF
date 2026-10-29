@@ -1,15 +1,11 @@
 """
 model/zones.py — thermal zones, and each surface's EnergyPlus boundary.
 
-PRESENCE-BASED (never LoD-driven): one E+ Zone per `nrg3:ThermalZone`; one implicit zone when
-the file declares none.
+PRESENCE-BASED (never LoD-driven): one E+ Zone per `nrg3:ThermalZone`. Nothing is invented: a
+building with NO ThermalZone, or with a surface that NO zone owns, is dropped WHOLE (`_drop`) and
+gets no IDF. Energy ADE spec Table 1: "Thermal zones must be modelled", in every LoD.
 
 OWNERSHIP WATERFALL (which surfaces a zone owns — most explicit first):
-  0. NO `nrg3:ThermalZone` at all -> ONE implicit zone owning the WHOLE shell, and WARNED so the
-     assumption is auditable (`_single_zone`). A closed shell proves at least one air volume
-     exists but never whether it is subdivided, so we model the minimum and invent no partition.
-     This rung yields the SAME zone shape as the others, so the boundary waterfall below runs
-     IDENTICALLY for every building — there is no second, shorter waterfall to drift.
   1. `nrg3:coincidesWithLodXHull = true` -> the zone ignores its partial thermalBoundary list
      and owns the WHOLE building shell (ADE cases 5.1 / 6.1).
   2. the SOLE zone of a building whose surfaces came from the RAW LoD1 SOLID, declaring NO
@@ -17,7 +13,7 @@ OWNERSHIP WATERFALL (which surfaces a zone owns — most explicit first):
      FORBIDDEN and coincidesWithLodXHull is a LoD2/3 concept, so the file has no other way to
      say it. Guarded to ONE zone and the raw-solid path so we never guess (see
      `owns_whole_lod1_hull`); LoD1 MULTIZONE (case 1.2) needs each zone's own solid and is
-     not implemented — it still warns.
+     not implemented — such a building is dropped (its faces have no owner).
   3. `nrg3:thermalBoundary` xlinks -> the zone owns exactly the surfaces it points at.
 
 BOUNDARY WATERFALL (most explicit first) — nothing is ever invented:
@@ -29,15 +25,16 @@ BOUNDARY WATERFALL (most explicit first) — nothing is ever invented:
   2. ONE surface owned by TWO zones -> warn + Adiabatic. Energy ADE models an interzone boundary
      as TWO real surfaces linked by `nrg3:relatedTo`, and E+ A7 must name a surface present in
      this IDF, so we never synthesize a twin.
-  3. `relatedTo` (relationType="adjacent") targeting a surface EMITTED IN THIS IDF owned by a
+  3. `relatedTo` (relationType="adjacentTo") targeting a surface EMITTED IN THIS IDF owned by a
      DIFFERENT zone -> Outside_Boundary_Condition = Surface, each face naming the other. Both
      faces already exist and each keeps its OWN construction — the file supplies the mirror
      via `nrg3:ReverseLayeredConstruction` (spec §3.8).
   4. any other adjacency (other building / not a surface) -> Adiabatic.
   5. nothing stated -> the surface type's default (Outdoors / Ground / Adiabatic).
 
-ORIENTATION: a face's outward normal points AWAY FROM THE ZONE THAT OWNS IT, so the same slab is
-a Ceiling to the zone below and a Floor to the zone above (`floor_or_ceiling`).
+ORIENTATION is the FILE's winding (semantics/building_surfaces.process_surfaces): each zone has
+its own surfaces, each pointing out of that zone, so the same slab is a
+Ceiling in the zone below and a Floor in the zone above.
 
 ZONE VOLUME is left to EnergyPlus (`autocalculate`): `nrg3:volume` is a stated, ambiguous
 attribute (grossVolume / netVolume / energyReferenceVolume) and our geometry is authoritative.
@@ -56,22 +53,18 @@ from __future__ import annotations
 
 import sys
 
-import numpy as np
-
 from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, warn
-from ..geometry import rings
-from ..semantics.building_surfaces import SurfacePath
-from ..semantics.surface_types import floor_or_ceiling, is_interior
+from ..semantics.building_surfaces import SurfacePath, coincides_with_hull
+from ..semantics.surface_types import is_interior
 from .citygml_read import _child_measure
-from .constructions import _child_text as child_text_value
 from .model import ABSENT, INVALID, OK, Zone, trace
 from .units import to_reference
 
 # Find ThermalZones
 def thermal_zones(doc, building_element):
-    # The building's own nrg3:ThermalZone objects ([] when the file has none -> the caller falls
-    # back to one implicit zone). DIRECT children: nrg3:thermalZone is a property of
+    # The building's own nrg3:ThermalZone objects ([] when the file has none -> the caller drops
+    # the building). DIRECT children: nrg3:thermalZone is a property of
     # _AbstractBuilding, so that is where a zone sits.
     # REF: ADE spec §4.3.1 (ThermalZone)
     if building_element is None:
@@ -79,20 +72,6 @@ def thermal_zones(doc, building_element):
     zone_properties = doc.children(building_element, "nrg", "thermalZone")
     zones = [doc.property_object(prop) for prop in zone_properties] # <thermalZone>
     return [zone for zone in zones if zone is not None]
-
-
-def coincides_with_hull(doc, zone_element):
-    # WHAT: True if the zone declares it fills the building's LoD2 or LoD3 hull, so it
-    #       owns the WHOLE shell and its partial thermalBoundary list is ignored.
-    # REF :   ADE spec §4.3.1 (nrg3:coincidesWithLodXHull).
-    # XSD : Energy_ADE_3.0_beta7.xsd defines both booleans on ThermalZoneType.
-    # SPEC: LoD2 special case 5.1 and LoD3 special case 6.1 reuse the normal
-    #       CityGML thematic surfaces/openings instead of duplicate thermal ones.
-    for flag in ("coincidesWithLod2Hull", "coincidesWithLod3Hull"):
-        text = child_text_value(doc, zone_element, "nrg", flag)
-        if text and text.strip().lower() == "true":
-            return True
-    return False
 
 
 def owns_whole_lod1_hull(doc, building, zone_elements, zone_element):
@@ -143,40 +122,31 @@ def boundary_surface_ids(doc, zone_element):
     for boundary_property in doc.children(zone_element, "nrg", "thermalBoundary"):
         boundary_surface = doc.property_object(boundary_property)   # <thermalBoundary> -> <WallSurface>...
 
-        if boundary_surface is not None and boundary_surface.get(GML_ID):
+        if boundary_surface is not None:
             surface_ids.append(boundary_surface.get(GML_ID))
     return surface_ids
 
-def _single_zone(building, building_surface_ids):
-    # OWNERSHIP RUNG 0 — the file declares NO nrg3:ThermalZone: ONE implicit zone owning the
-    # WHOLE shell. A closed shell PROVES at least one air volume exists but never whether it is
-    # subdivided, so we model the minimum (one) and never invent an interior partition.
-    #
-    # Returns the SAME [{name, ids, provenance}] shape pass 1 builds for a real ThermalZone, so
-    # passes 2-4 (orientation, pairing, the boundary waterfall) run IDENTICALLY for every
-    # building. This decides OWNERSHIP ONLY and never touches `boundary`: a second, shorter
-    # waterfall used to live here and had already drifted out of sync — it applied isAdiabatic
-    # but skipped the `relatedTo adjacent -> Adiabatic` rung, so a wall shared with a
-    # NEIGHBOURING building stayed Outdoors, i.e. wrongly sun- and wind-exposed.
-    #
-    # WARN so the assumption is auditable: the log must say out loud that the zoning came from
-    # US, not the file (Alderaan's id_box_building_20..30 are plain CityGML boxes, no ADE zoning).
-    zone_name = f"{building.id}_Zone"
-    warn(f"building {building.id} declares no nrg3:ThermalZone; modelled as ONE implicit "
-         f"zone {zone_name} (no Energy ADE zoning in file)")
-    return [{"name": zone_name,
-             "ids": set(building_surface_ids),
-             # No nrg3:ThermalZone element exists, so there is nowhere for infiltrationRate to live.
-             "infiltration_ach": None,
-             "provenance": {"name": f"{zone_name} (implicit single zone)",
-                            "ownership": f"implicit single zone (no nrg3:ThermalZone): owns "
-                                         f"{len(building_surface_ids)} surface(s)",
-                            "infiltration_ach": trace(ABSENT, "no nrg3:ThermalZone to carry "
-                                                              "infiltrationRate")}}]
+def _drop(building, reason):
+    """Take a building out of the IDF output and record why.
+
+    Parameters
+    ----------
+    building : Building
+        Changed in place: its surfaces are emptied, so every later step skips it.
+    reason : str
+        Stored in ``building.provenance["skipped"]``; model/reader.py warns it ONCE.
+
+    Notes
+    -----
+    A building that is not modelled per the spec is dropped WHOLE: no zone is invented and no
+    surface is placed in a zone the file did not name.
+    """
+    building.surfaces = []
+    building.provenance["skipped"] = reason
 
 
 def _interzone_pairs(surfaces, zone_of):
-    # WHAT: surface_id -> partner surface_id, for the `relatedTo adjacent` relations EnergyPlus
+    # WHAT: surface_id -> partner surface_id, for the `relatedTo adjacentTo` relations EnergyPlus
     #       can actually honour. A target qualifies ONLY when it is
     #         (a) a surface EMITTED IN THIS IDF (E+ A7 must name a surface in the same file),
     #         (b) owned by a DIFFERENT zone (same zone = not an interzone face), and
@@ -204,19 +174,38 @@ def _interzone_pairs(surfaces, zone_of):
     return pairs
 
 
-# handles one zone and multiplezone
-# detailed_interior: False (default) = FAST, interior zone-to-zone faces -> Adiabatic;
-#                    True = model heat transfer (interior faces can become Surface pairs).
 def assign_zones(doc, middle, detailed_interior=False):
-    # Build `building.zones`, then give every surface its zone, orientation and boundary:
-    #   pass 1  each ThermalZone's owned surface-id set (hull -> the whole shell)
-    #   pass 2  orient each face against ITS OWN zone, and assign that zone
-    #   pass 3  find the interzone pairs `relatedTo` lets EnergyPlus honour
-    #   pass 4  the boundary waterfall (see the module docstring)
+    """Give each building its zones, and each surface its zone, orientation and boundary.
+
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    middle : Model
+        The middle layer, changed in place.
+    detailed_interior : bool, optional
+        False (default) = FAST: interior zone-to-zone faces are Adiabatic.
+        True = interior faces may become EnergyPlus Surface pairs.
+
+    Returns
+    -------
+    Model
+        `middle`, with ``building.zones`` filled and each surface's zone, boundary and
+        boundary_object set (points and surface_type keep the file's winding).
+
+    Notes
+    -----
+    pass 1  each ThermalZone's owned surface ids (OWNERSHIP WATERFALL, module docstring)
+    pass 2  assign each face its zone
+    pass 3  the interzone pairs `relatedTo` lets EnergyPlus honour
+    pass 4  the boundary waterfall (BOUNDARY WATERFALL, module docstring)
+    Before pass 1, a building with no ThermalZone is dropped (`_drop`); after it, so is a
+    building with a surface no zone owns.
+    """
     for building in middle.buildings:
         surfaces = building.surfaces
         if not surfaces:
-            continue          # no envelope -> no zone to own it (the writer skips this building)
+            continue          # no envelope -> nothing to own (model/reader.py warns once)
         building_surface_ids = {surface.source_id for surface in surfaces}
         source_to_surface_ids = {}
         for surface in surfaces:
@@ -224,16 +213,16 @@ def assign_zones(doc, middle, detailed_interior=False):
             source_to_surface_ids.setdefault(surface.source_gml_id or surface.source_id, set()).add(surface.source_id)
 
         zone_elements = thermal_zones(doc, doc.get_by_id(building.id)) #Find ThermalZones
+        if not zone_elements:
+            _drop(building, "declares no nrg3:ThermalZone (Energy ADE Table 1: thermal zones "
+                            "must be modelled)")
+            continue
 
-        # pass 1: resolve each zone's OWNED surface-id set.
-        #   rung 0  NO nrg3:ThermalZone at all -> ONE implicit zone owning the whole shell;
-        #   otherwise THREE sources, most explicit first:
-        #   coincidesWithLodXHull -> LoD1 sole zone -> nrg3:thermalBoundary.
-        # Both branches produce the SAME zone shape, so passes 2-4 below are SHARED by every
-        # building — one boundary waterfall, in one place, that cannot drift.
-        zones = _single_zone(building, building_surface_ids) if not zone_elements else []
+        # pass 1: resolve each zone's OWNED surface-id set, from THREE sources, most explicit
+        # first: coincidesWithLodXHull -> LoD1 sole zone -> nrg3:thermalBoundary.
+        zones = []
         for zone_element in zone_elements:
-            name = zone_element.get(GML_ID) or f"{building.id}_Zone{len(zones) + 1}"
+            name = zone_element.get(GML_ID)
             coincides = coincides_with_hull(doc, zone_element)
             if coincides:
                 owned_ids = set(building_surface_ids)  # the zone OWNS THE WHOLE SHELL
@@ -255,51 +244,26 @@ def assign_zones(doc, middle, detailed_interior=False):
                                          "ownership": f"{ownership_source}: owns "
                                                       f"{len(owned_ids)} surface(s)",
                                          "infiltration_ach": infiltration_note}})
+        all_owned_ids = {sid for zone in zones for sid in zone["ids"]}
+        unowned_ids = [surface.source_id for surface in surfaces
+                       if surface.source_id not in all_owned_ids]
+        if unowned_ids:
+            _drop(building, f"{len(unowned_ids)} surface(s) owned by no ThermalZone: {unowned_ids}")
+            continue
         building.zones = [Zone(name=zone["name"], infiltration_ach=zone["infiltration_ach"],
                                provenance=zone["provenance"])
                           for zone in zones]
 
-        # Zone centroid = the reference point a face is oriented AWAY from. Computed ONCE,
-        # before any re-orientation (re-orienting only REVERSES a ring, never moves its
-        # points, so the centroid is stable either way — precomputing makes that obvious).
-        surfaces_by_id = {surface.source_id: surface for surface in surfaces}
-
-        def zone_centroid(zone):
-            zone_points = [point for sid in zone["ids"] if sid in surfaces_by_id
-                           for point in surfaces_by_id[sid].points]
-            return rings.centroid(zone_points) if zone_points else np.zeros(3)
-
-        zone_centroids = {zone["name"]: zone_centroid(zone) for zone in zones}
-
-        # ---- pass 2: orient each face against ITS OWN zone, and assign that zone ----------
+        # ---- pass 2: assign each face its zone -------------------------------------------
+        # Every surface has at least one owner here: an unowned one dropped the building above.
+        # Orientation is NOT touched: each face keeps the file's winding (process_surfaces).
         owners_by_surface = {}
         for surface in surfaces: # Count how many zones own each surface
             owners = [zone for zone in zones if surface.source_id in zone["ids"]]
             owners_by_surface[surface.source_id] = owners
-
-            # ORIENTATION (E+ convention): a face's outward normal points AWAY FROM THE ZONE
-            # THAT OWNS IT. building_surfaces.process_surfaces could only orient against the
-            # BUILDING centroid, which is the wrong reference for an INTERIOR horizontal slab:
-            # both of its faces then get the SAME normal, so a zone ends up with two Floors and
-            # no Ceiling (wrong Zone Floor Area + "unenclosed zone" view-factor warnings).
-            # Now that ownership is known, re-orient against the owning zone and re-resolve
-            # Floor/Ceiling. Single-zone buildings are unaffected (zone centroid = building's).
-            if owners:
-                oriented, normal = rings.orient_outward(surface.points,
-                                                        zone_centroids[owners[0]["name"]])
-                surface.points = [list(point) for point in oriented]
-                if surface.surface_type in ("Floor", "Ceiling"):
-                    surface.surface_type = floor_or_ceiling(normal[2])
-                surface.provenance["surface_type"] = (
-                    f"{surface.surface_type} (outward normal from owning zone "
-                    f"{owners[0]['name']}, z={normal[2]:.3f})")
-                surface.zone = owners[0]["name"]
-                surface.provenance["zone"] = (f"assigned to {owners[0]['name']} "
-                                              f"({len(owners)} owning zone(s))")
-            else:                                                # orphan -> never drop geometry
-                warn(f"surface {surface.source_id} in no ThermalZone; placed in {zones[0]['name']}")
-                surface.zone = zones[0]["name"]
-                surface.provenance["zone"] = f"assigned to {zones[0]['name']} (orphan fallback)"
+            surface.zone = owners[0]["name"]
+            surface.provenance["zone"] = (f"assigned to {owners[0]['name']} "
+                                          f"({len(owners)} owning zone(s))")
 
         # ---- pass 3: which faces form a REAL EnergyPlus interzone pair? -------------------
         # Needs every surface's zone, so it runs AFTER pass 2.
@@ -337,7 +301,7 @@ def assign_zones(doc, middle, detailed_interior=False):
                 partner = pairs[surface.source_id]                #    (both faces already exist)
                 surface.boundary = "Surface"        # OVERWRITES the "Adiabatic" default
                 surface.boundary_object = partner
-                note = (f"Surface -> {partner} (relatedTo adjacent; partner surface is in this "
+                note = (f"Surface -> {partner} (relatedTo adjacentTo; partner surface is in this "
                         f"IDF, zone {zone_of[partner]})")
 
             elif surface.adjacent_ids:                           # 4. adjacency E+ cannot honour

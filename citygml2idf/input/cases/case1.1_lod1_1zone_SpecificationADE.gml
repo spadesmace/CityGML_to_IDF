@@ -1,54 +1,45 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================================
-  Energy ADE 3.0 — Table 2, CASE 1.1
+  Energy ADE 3.0, Table 2, CASE 1.1
   "Single LoD1 thermal zone, no thermal openings, no thermal boundaries"
   SYNTHETIC, self-contained (every reference resolves inside this file).
   ============================================================================
 
-  PARSE PATH (what the pipeline is expected to take)
-    geometry  : SurfacePath.RAW_SOLID_FALLBACK
-                No bldg:boundedBy thematic surfaces and no nrg3:thermalBoundary
-                exist, so select_surface_path() falls through to the raw faces of
-                bldg:lod1Solid; each face's role comes from its OUTWARD NORMAL
-                (geometry/classify.py), never from a label.
-    physics   : construction-owner cascade -> surface (a gml:Polygon, cannot own a
-                LayeredConstruction) -> ThermalZone CONTEXT -> Tier 2 (uValue, no
-                layers) -> Material:NoMass with R = 1/U.
-    zoning    : one nrg3:ThermalZone -> one E+ Zone owning the whole hull.
+  PARSE PATH (what the reader must do with this file)
+    geometry      : the 6 polygons of bldg:lod1Solid (there are no thematic surfaces
+                    and no thermal boundaries). Each face keeps the file's winding; its
+                    role comes from its direction: up = roof, down = ground, sideways = wall.
+    zones         : one nrg3:ThermalZone, the only zone of an LoD1 building, owns the
+                    whole hull.
+    constructions : the zone's averaged LayeredConstruction (uValue 0.5, no layers)
+                    reaches all 6 faces -> Material:NoMass, R = 1 / 0.5 = 2.0 m2-K/W.
+    windows       : none (LoD1 has no openings).
+    infiltration  : nrg3:infiltrationRate 0.3 1/h -> ZoneInfiltration 0.3 ACH.
 
   GEOMETRY
-    A 10 (x) x 8 (y) x 3 (z) box at the origin. Deliberately non-cubic so an
-    axis swap would be visible. Faces are wound CCW seen from OUTSIDE.
-      ground  z=0        area 80 m2   -> Floor / Ground
-      roof    z=3        area 80 m2   -> Roof  / Outdoors
-      south   y=0        area 30 m2   |
-      north   y=8        area 30 m2   |-> Wall / Outdoors
-      east    x=10       area 24 m2   |
-      west    x=0        area 24 m2   |
-    Total envelope = 268 m2. Zone volume = 240 m3.
+  A 10 (x) x 8 (y) x 3 (z) box at the origin; every face counter-clockwise seen
+  from outside (its normal points out).
+    ground z=0   80 m2  |  roof  z=3   80 m2
+    south  y=0   30 m2  |  north y=8   30 m2  |  east x=10  24 m2  |  west x=0  24 m2
+  Total envelope 268 m2; zone volume 240 m3 (= the stated nrg3:volume).
+  The box is non-cubic on purpose, so an axis swap would show.
 
-  ENERGY ADE CONTENT (per the spec's rules for LoD1)
-    * ThermalZone modelled, with an OPTIONAL LoD1 solid of its own. Per the spec
-      that solid XLINKS the homologous polygons of the building's lod1Solid
-      instead of duplicating them — this also proves the parser does NOT
-      double-count those faces (it reads bldg:lod1Solid only).
-    * NO thermalBoundary and NO thermal openings — both forbidden in LoD1.
-    * coincidesWithLod2Hull / coincidesWithLod3Hull = false: they are LoD2/LoD3
-      concepts and do not apply here (the XSD makes both elements MANDATORY on
-      ThermalZoneType, so they must still be written).
-    * ONE averaged LayeredConstruction associated to the THERMAL ZONE, carrying a
-      single U value for the whole thermal hull (Table 2, case 1.1). It is INLINE
-      here (case 2.1 covers the xlink form). No gValue: there are no openings.
+  ENERGY ADE CONTENT (the spec's LoD1 rules: Table 1 and Table 2, case 1.1)
+    * One ThermalZone, with an optional LoD1 solid of its own that XLinks the
+      building's lod1Solid polygons (it must not be read as extra faces).
+    * No thermalBoundary and no openings: neither is allowed in LoD1.
+    * coincidesWithLod2Hull / coincidesWithLod3Hull = false (mandatory in the XSD,
+      not used in LoD1).
+    * ONE averaged LayeredConstruction on the zone, inline: uValue 0.5 W/(K*m^2).
 
   TEST AIM
-    1. The file passes the offline XSD gate (CityGML 2.0 + Energy ADE 3.0 beta7).
-    2. The parser picks RAW_SOLID_FALLBACK and yields exactly 6 surfaces with the
-       roles/areas above.
-    3. The single hull construction on the ZONE reaches all 6 surfaces through the
-       context cascade (Tier 2 -> Material:NoMass, R = 1/0.5 = 2.0 m2-K/W).
-    4. One E+ Zone owns all 6 surfaces.
-    5. EnergyPlus runs with exit 0 and 0 Severe / 0 Fatal.
+    1. XSD gate passes (CityGML 2.0 + Energy ADE 3.0 beta7).
+    2. Exactly 6 surfaces from bldg:lod1Solid, with the roles and areas above.
+    3. All 6 use the zone's construction: Material:NoMass, R = 2.0 m2-K/W.
+    4. One E+ Zone owns all 6 surfaces; ZoneInfiltration 0.3 ACH; no windows.
+    5. EnergyPlus exit 0, 0 Severe / 0 Fatal, with ONE expected warning, "This
+       building has no thermal mass": a U-value-only construction has none.
 -->
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
                 xmlns:bldg="http://www.opengis.net/citygml/building/2.0"
@@ -154,7 +145,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">240</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 

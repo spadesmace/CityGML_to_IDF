@@ -8,7 +8,7 @@ facts and applies the boundary waterfall.
   1. Is the surface explicitly adiabatic?      nrg3:bdgBdrySurfIsAdiabatic  -> True/False/None
   2. Which surfaces is it adjacent to?         nrg3:relatedTo
                                                  -> nrg3:CityObjectRelation
-                                                      -> nrg3:relationType == "adjacent"
+                                                      -> nrg3:relationType == "adjacentTo"
                                                       -> nrg3:relatedTo/@xlink:href
                                                -> [target gml:id, ...]
 
@@ -17,10 +17,14 @@ opposite-normal + polygon-overlap tests, then injects gen:stringAttribute "adjac
 our Energy ADE files ALREADY carry the relation, so we read it instead of recomputing it —
 the golden rule (trust structure + explicit references, never guess).
 
-TWO TRAPS this module is built around, both confirmed against Alderaan:
+THE CODELIST DECIDES: nrg3:relationType is a RelationTypeValue, and the Energy ADE codelist
+(codelists/RelationTypeValue.xml) allows exactly adjacentTo, installedOn and sharedWith. We act
+on "adjacentTo" only, spelled exactly as in the codelist; any other value is not an adjacency.
+
+TWO TRAPS this module is built around:
   * `relatedTo` is OVERLOADED. It also carries relationType="installedOn" (solar/PV modules
-    mounted on a surface). We therefore filter on relationType == "adjacent" ONLY.
-  * an `adjacent` target may be ANY core:_CityObject — another Building, BuildingPart,
+    mounted on a surface), which is skipped.
+  * an `adjacentTo` target may be ANY core:_CityObject — another Building, BuildingPart,
     ThermalZone or CityFurniture, not just a surface. We return the raw target ids; the
     CALLER decides whether a target is a real surface inside the SAME IDF. (EnergyPlus
     Outside_Boundary_Condition=Surface must name a surface present in the same IDF.)
@@ -38,7 +42,7 @@ from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, local_name
 from .citygml_read import _child_text
 
-ADJACENT = "adjacent"          # the only nrg3:relationType we act on
+ADJACENT_TO = "adjacentTo"     # the only nrg3:relationType we act on (codelist spelling)
 
 
 def surface_is_adiabatic(doc, surf_el):
@@ -53,18 +57,34 @@ def surface_is_adiabatic(doc, surf_el):
 
 
 def adjacent_target_ids(doc, element):
-    """gml:ids this element declares itself ADJACENT to, via
-    nrg3:relatedTo -> nrg3:CityObjectRelation(relationType='adjacent') -> nrg3:relatedTo/@xlink:href.
+    """The gml:ids this element declares itself adjacent to.
 
-    Relations of any other relationType (e.g. 'installedOn' for PV modules) are skipped.
-    The xlink is resolved through property_object, so both '#id' and bare 'id' work."""
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    element : lxml element
+        A boundary surface.
+
+    Returns
+    -------
+    list of str
+        Targets of nrg3:relatedTo -> nrg3:CityObjectRelation (relationType "adjacentTo")
+        -> nrg3:relatedTo/@xlink:href; [] when there are none.
+
+    Notes
+    -----
+    Only the codelist value "adjacentTo" counts (codelists/RelationTypeValue.xml); every other
+    value, e.g. "installedOn" for PV modules, is skipped. The xlink is resolved through
+    property_object, so both '#id' and a bare 'id' work.
+    """
     targets = []
     for relation_property in doc.children(element, "nrg", "relatedTo"):
         relation = doc.property_object(relation_property)          # nrg3:CityObjectRelation
         if relation is None or local_name(relation) != "CityObjectRelation":
             continue
-        relation_type = (_child_text(doc, relation, "nrg", "relationType") or "").strip().lower()
-        if relation_type != ADJACENT:
+        relation_type = (_child_text(doc, relation, "nrg", "relationType") or "").strip()
+        if relation_type != ADJACENT_TO:
             continue
         for target_property in doc.children(relation, "nrg", "relatedTo"):
             target = doc.property_object(target_property)           # follows xlink:href
@@ -99,7 +119,7 @@ def attach_facts(doc, model):
                     f"citygml nrg3:bdgBdrySurfIsAdiabatic = {str(is_adiabatic).lower()}")
             if adjacent:
                 surface.provenance["adjacent_ids"] = (
-                    f"citygml relatedTo/CityObjectRelation[relationType='adjacent'] -> "
+                    f"citygml relatedTo/CityObjectRelation[relationType='adjacentTo'] -> "
                     f"{', '.join(adjacent)}")
     return model
 

@@ -1,29 +1,42 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  SYNTHETIC CASE - LoD2, single thermal zone, windows from (total - opaque) AREAS.
+  ============================================================================
+  SUPPORT SAMPLE (not a Table-2 case): LoD2, single thermal zone, windows from the
+  TOTAL and OPAQUE surface AREAS.
+  SYNTHETIC, self-contained (every reference resolves inside this file).
+  ============================================================================
 
-  PARSE PATH   : SurfacePath = thermalBoundary (labelled surfaces) -> openings.py cascade
-                 falls past A (no LoD3 bldg:Window) and past B (NO bdgBdrySurfOpeningToSurfaceRatio)
-                 to PATH C: ratio = (totalSurfaceArea - opaqueSurfaceArea) / totalSurfaceArea.
-  GEOMETRY     : 10 x 10 x 3 box, flat roof. Every wall is 10 x 3 = 30 m2 gross.
-  ADE CONTENT  : each WallSurface carries nrg3:bdgBdrySurfTotalSurfaceArea +
-                 nrg3:bdgBdrySurfOpaqueSurfaceArea (both gml:AreaType, XSD lines 1618/1646,
-                 substitutionGroup bldg:_GenericApplicationPropertyOfBoundarySurface).
-                 Constructions are DETAILED LAYERS, so the zone keeps thermal mass.
-  TEST AIM     : the AREA unit waterfall. gml:AreaType is an EMPTY restriction of MeasureType,
-                 so ANY uom string is legal - the four walls deliberately state the SAME
-                 physical areas in four different ways:
-                     south  30 m^2   / 21 m^2       same unit, same spelling
-                     east   30 m^2   / 21 m2        same unit, DIFFERENT spelling
-                     north  30 m^2   / 210000 cm^2  DIFFERENT area units
-                     west   322.9173 ft^2 / 226.0421 ft^2   imperial
-  PREDICTION   : ALL FOUR resolve to ratio 0.30 -> one centred synthesized window of
-                 9.0 m2 per wall, glazing = DEFAULT_WINDOW (U 2.8 / SHGC 0.7).
-                 The two right-hand cases FAILED before units.py gained the "area" quantity:
-                 the old code compared the two uom STRINGS and refused when they differed.
+  PARSE PATH (what the reader must do with this file)
+    geometry, zones and constructions : as LoD2_1Zone_window_WWR_synth.gml (same box,
+                    same layers, same missing fields).
+    windows       : no opening ratio here. Each wall states
+                    nrg3:bdgBdrySurfTotalSurfaceArea and nrg3:bdgBdrySurfOpaqueSurfaceArea,
+                    so ratio = (total - opaque) / total = 0.30 -> one centred 9.0 m2
+                    window per wall with the default glazing.
+    infiltration  : nrg3:infiltrationRate 0.0001 1/s = 0.36 1/h -> ZoneInfiltration
+                    0.36 ACH (a unit-conversion test).
+
+  GEOMETRY
+    A 10 (x) x 10 (y) x 3 (z) box; every face counter-clockwise seen from outside.
+    Every wall is 10 x 3 = 30 m2 gross. Zone volume 300 m3 (= the stated nrg3:volume).
+
+  ENERGY ADE CONTENT
+    Both areas are gml:AreaType, so any area unit is legal. The four walls state the
+    same physical areas in four ways:
+        south  30 m^2         / 21 m^2          same unit, same spelling
+        east   30 m^2         / 21 m2           same unit, other spelling
+        north  30 m^2         / 210000 cm^2     different units
+        west   322.9173 ft^2  / 226.0421 ft^2   imperial
+    Each area is converted to m2 BEFORE the subtraction.
+
+  TEST AIM
+    1. XSD gate passes (CityGML 2.0 + Energy ADE 3.0 beta7).
+    2. All four walls give ratio 0.30 -> a 9.0 m2 window each.
+    3. ZoneInfiltration 0.36 ACH (0.0001 1/s converted).
+    4. EnergyPlus exit 0, 0 Severe / 0 Fatal, 0 warnings.
 -->
 <core:CityModel xmlns:app="http://www.opengis.net/citygml/appearance/2.0" xmlns:bldg="http://www.opengis.net/citygml/building/2.0" xmlns:brid="http://www.opengis.net/citygml/bridge/2.0" xmlns:core="http://www.opengis.net/citygml/2.0" xmlns:dem="http://www.opengis.net/citygml/relief/2.0" xmlns:frn="http://www.opengis.net/citygml/cityfurniture/2.0" xmlns:gen="http://www.opengis.net/citygml/generics/2.0" xmlns:gml="http://www.opengis.net/gml" xmlns:grp="http://www.opengis.net/citygml/cityobjectgroup/2.0" xmlns:luse="http://www.opengis.net/citygml/landuse/2.0" xmlns:nrg3="http://www.citygml.org/ade/energy/3.0" xmlns:pbase="http://www.opengis.net/citygml/profiles/base/2.0" xmlns:tex="http://www.opengis.net/citygml/texturedsurface/2.0" xmlns:tran="http://www.opengis.net/citygml/transportation/2.0" xmlns:tun="http://www.opengis.net/citygml/tunnel/2.0" xmlns:veg="http://www.opengis.net/citygml/vegetation/2.0" xmlns:wtr="http://www.opengis.net/citygml/waterbody/2.0" xmlns:xAL="urn:oasis:names:tc:ciq:xsdschema:xAL:2.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-	<gml:name> TESt - LoD2 single zone, thermal boundaries, WWR windows</gml:name>
+	<gml:name>LoD2 single zone, thermal boundaries, windows from total and opaque areas</gml:name>
 	<gml:boundedBy>
 		<gml:Envelope srsName="EPSG:28992" srsDimension="3">
 			<gml:lowerCorner>0 0 0</gml:lowerCorner>
@@ -133,7 +146,7 @@
 					<nrg3:volume>
 						<nrg3:QualifiedVolume>
 							<nrg3:value uom="m^3">300</nrg3:value>
-							<nrg3:type codeSpace="volume_codeSpace">grossVolume</nrg3:type>
+							<nrg3:type codeSpace="http://www.sig3d.org/citygml/2.0/energy/3.0/VolumeTypeValue">grossVolume</nrg3:type>
 						</nrg3:QualifiedVolume>
 					</nrg3:volume>
 					<!-- air leakage through the fabric; E+ ZoneInfiltration:DesignFlowRate, AirChanges/Hour -->
@@ -153,7 +166,7 @@
 									<gml:surfaceMember>
 										<gml:Polygon gml:id="CaseC_poly_ground">
 											<gml:exterior><gml:LinearRing>
-												<gml:posList>0 0 0 10 0 0 10 10 0 0 10 0 0 0 0</gml:posList>
+												<gml:posList>0 0 0 0 10 0 10 10 0 10 0 0 0 0 0</gml:posList>
 											</gml:LinearRing></gml:exterior>
 										</gml:Polygon>
 									</gml:surfaceMember>
