@@ -12,9 +12,11 @@ OWNERSHIP WATERFALL (which surfaces a zone owns — most explicit first):
      thermalBoundary -> owns the whole hull (ADE case 1.1). In LoD1 thermal boundaries are
      FORBIDDEN and coincidesWithLodXHull is a LoD2/3 concept, so the file has no other way to
      say it. Guarded to ONE zone and the raw-solid path so we never guess (see
-     `owns_whole_lod1_hull`); LoD1 MULTIZONE (case 1.2) needs each zone's own solid and is
-     not implemented — such a building is dropped (its faces have no owner).
-  3. `nrg3:thermalBoundary` xlinks -> the zone owns exactly the surfaces it points at.
+     `owns_whole_lod1_hull`).
+  3. the zone's own `nrg3:lod1Solid` -> the zone owns the polygons of that solid (ADE case
+     1.2, LoD1 multizone). Several zones without solids of their own are not read: nothing
+     says which face belongs to which zone, so their faces have no owner.
+  4. `nrg3:thermalBoundary` xlinks -> the zone owns exactly the surfaces it points at.
 
 BOUNDARY WATERFALL (most explicit first) — nothing is ever invented:
   0. FAST workflow (default, detailed_interior=False): every INTERIOR zone-to-zone face
@@ -30,7 +32,9 @@ BOUNDARY WATERFALL (most explicit first) — nothing is ever invented:
      faces already exist and each keeps its OWN construction — the file supplies the mirror
      via `nrg3:ReverseLayeredConstruction` (spec §3.8).
   4. any other adjacency (other building / not a surface) -> Adiabatic.
-  5. nothing stated -> the surface type's default (Outdoors / Ground / Adiabatic).
+  5. LoD1 face between zones (a zone's own polygon, not one of the building's lod1Solid
+     polygons) -> Adiabatic, in both workflows: LoD1 has no relatedTo to name a partner.
+  6. nothing stated -> the surface type's default (Outdoors / Ground / Adiabatic).
 
 ORIENTATION is the FILE's winding (semantics/building_surfaces.process_surfaces): each zone has
 its own surfaces, each pointing out of that zone, so the same slab is a
@@ -55,7 +59,7 @@ import sys
 
 from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID, warn
-from ..semantics.building_surfaces import SurfacePath, coincides_with_hull
+from ..semantics.building_surfaces import SurfacePath, coincides_with_hull, lod1_block_ids
 from ..semantics.surface_types import is_interior
 from .citygml_read import _child_measure
 from .model import ABSENT, INVALID, OK, Zone, trace
@@ -112,6 +116,37 @@ def infiltration_air_changes(doc, zone_element, zone_name):
                                     f"(bad unit or negative); no ZoneInfiltration object emitted")
     return air_changes, trace(OK, f"nrg3:infiltrationRate {raw} {uom or '1/h'} -> "
                                   f"{round(air_changes, 4)} 1/h (E+ AirChanges/Hour)")
+
+# LOD 1 Multizone logic 
+def solid_polygon_ids(doc, zone_element):
+    """The gml:ids of the polygons in a zone's own `nrg3:lod1Solid`.
+
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    zone_element : lxml element
+        An `nrg3:ThermalZone`.
+
+    Returns
+    -------
+    list of str
+        In file order; [] when the zone has no LoD1 solid of its own. A polygon reached by
+        xlink keeps the id of the polygon it points at.
+
+    Notes
+    -----
+    Energy ADE Table 2, case 1.2: "The thermal zones can optionally be modelled as LoD1 solid
+    geometries"; ADE XSD AbstractBuildingPartitionType: `lod1Solid`. The LoD1 twin of
+    `boundary_surface_ids`: both read from the zone's own XML which faces belong to it.
+    """
+    polygon_ids = []
+    for solid_property in doc.children(zone_element, "nrg", "lod1Solid"):
+        solid = doc.property_object(solid_property)
+        if solid is not None:
+            polygon_ids.extend(polygon.get(GML_ID)
+                               for polygon, _ in xml_io.surface_polygons(doc, solid))
+    return polygon_ids
 
 
 def boundary_surface_ids(doc, zone_element):
@@ -218,12 +253,14 @@ def assign_zones(doc, middle, detailed_interior=False):
                             "must be modelled)")
             continue
 
-        # pass 1: resolve each zone's OWNED surface-id set, from THREE sources, most explicit
-        # first: coincidesWithLodXHull -> LoD1 sole zone -> nrg3:thermalBoundary.
+        # pass 1: resolve each zone's OWNED surface-id set, from FOUR sources, most explicit
+        # first: coincidesWithLodXHull -> LoD1 sole zone -> the zone's own LoD1 solid ->
+        # nrg3:thermalBoundary.
         zones = []
         for zone_element in zone_elements:
             name = zone_element.get(GML_ID)
             coincides = coincides_with_hull(doc, zone_element)
+            solid_ids = solid_polygon_ids(doc, zone_element) if building.lod == 1 else []
             if coincides:
                 owned_ids = set(building_surface_ids)  # the zone OWNS THE WHOLE SHELL
                 ownership_source = "coincidesWithLodXHull"
@@ -231,6 +268,11 @@ def assign_zones(doc, middle, detailed_interior=False):
                 owned_ids = set(building_surface_ids)  # the sole LoD1 zone IS the thermal hull
                 ownership_source = ("LoD1 whole-hull assignment (sole ThermalZone, no "
                                     "thermalBoundary, raw LoD1 solid faces)")
+            elif solid_ids:                            # LoD1 multizone: its own solid's faces
+                owned_ids = set()
+                for sid in solid_ids:
+                    owned_ids.update(source_to_surface_ids.get(sid, set()))
+                ownership_source = "the zone's own nrg3:lod1Solid"
             else:
                 owned_ids = set()
                 referenced_ids = boundary_surface_ids(doc, zone_element) # Read each zone’s owned surfaces from nrg3:thermalBoundary
@@ -269,6 +311,10 @@ def assign_zones(doc, middle, detailed_interior=False):
         # Needs every surface's zone, so it runs AFTER pass 2.
         zone_of = {surface.source_id: surface.zone for surface in surfaces}
         pairs = _interzone_pairs(surfaces, zone_of)
+
+        block_ids = []
+        if building.lod == 1:
+            block_ids = lod1_block_ids(doc, doc.get_by_id(building.id))
 
         # ---- pass 4: the boundary waterfall (most explicit first) -------------------------
         for surface in surfaces:
@@ -323,7 +369,14 @@ def assign_zones(doc, middle, detailed_interior=False):
                 note = (f"Adiabatic (adjacent {surface.adjacent_ids[0]} is not a surface of a "
                         f"different zone in this IDF)")
 
-            else:                                                # 5. surface-type default
+            elif building.lod == 1 and surface.source_id not in block_ids:   # 5. LoD1 face between zones
+                surface.boundary = "Adiabatic"
+                if surface.surface_type == "Roof":            # the slab seen from the zone below
+                    surface.surface_type = "Ceiling"
+                    surface.provenance["surface_type"] = "Ceiling (LoD1 slab seen from the zone below)"
+                note = "Adiabatic (LoD1 face between two zones)"
+
+            else:                                                # 6. surface-type default
                 note = f"{surface.boundary} (surface-type default)"
 
             surface.provenance["boundary"] = note

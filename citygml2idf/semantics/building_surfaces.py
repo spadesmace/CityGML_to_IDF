@@ -386,22 +386,109 @@ def _solid_faces(doc, building, lod):
             out.append((None, sid, ring, contexts, sid))
     return out
 
+# LOD1 Multizone logic 
+def lod1_block_ids(doc, building):
+    """The gml:ids of the building's own LoD1 polygons (the block the zones xlink).
+
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    building : lxml element
+        A `bldg:Building`.
+
+    Returns
+    -------
+    list of str
+        In file order; [] when the building has no readable LoD1 geometry.
+
+    Notes
+    -----
+    Energy ADE Table 2, case 1.2: "XLinks can be used to reference the homologous polygons of
+    the LoD1 solid". A zone face that is one of these polygons is exterior; a zone face with a
+    polygon of its own lies between two zones.
+    """
+    ids = []
+    for geometry in _geometry_property_objects(doc, building, 1):
+        for polygon, _ in xml_io.surface_polygons(doc, geometry):
+            ids.append(polygon.get(GML_ID))
+    return ids
+
+# LOD1 Logic
+def _zone_solid_faces(doc, building):
+    """LoD1: the faces of each zone's own `nrg3:lod1Solid`, zone by zone.
+
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    building : lxml element
+        A `bldg:Building`.
+
+    Returns
+    -------
+    list of tuple
+        (None, sid, ring, construction_context_ids, sid) per face, in file order; the
+        construction owners are the face's own zone, then the building. [] when no zone has
+        a LoD1 solid of its own.
+
+    Notes
+    -----
+    Energy ADE Table 2, case 1.2: "The thermal zones can optionally be modelled as LoD1 solid
+    geometries. XLinks can be used to reference the homologous polygons of the LoD1 solid", and
+    "A LayeredConstruction object is associated to each thermal zone". The ADE XSD gives every
+    zone an optional `nrg3:lod1Solid` (AbstractBuildingPartitionType). An xlinked face IS the
+    building's polygon (same gml:id); a polygon reached twice is read once.
+    """
+    out = []
+    seen = set()
+    for zone_property in doc.children(building, "nrg", "thermalZone"):
+        zone = doc.property_object(zone_property)
+        if zone is None:
+            continue
+        contexts = _unique_ids(zone.get(GML_ID), building.get(GML_ID))
+        for solid_property in doc.children(zone, "nrg", "lod1Solid"):
+            solid = doc.property_object(solid_property)
+            if solid is None:
+                continue
+            for polygon, ring in xml_io.surface_polygons(doc, solid):
+                sid = polygon.get(GML_ID)
+                if sid in seen:                  # the same polygon reached twice (xlink)
+                    continue
+                seen.add(sid)
+                out.append((None, sid, ring, contexts, sid))
+    return out
+
 
 class SurfacePath(Enum):
-    """WHICH source a building's surfaces came from (recorded in the trace).
+    """WHERE in the file a building's surfaces came from (kept on the Building for audit).
 
-    Priority = most-detailed first. NOTE: "coincides-with-hull" is NOT a separate
-    path — a hull-coincident zone exposes no thermalBoundary, so it simply falls
-    through to CITYGML_BUILDING_SHELL.
+    The label names the source only; it does not count zones. Who owns which surface is read
+    from the XML in model/zones.py.
+
+    Attributes
+    ----------
+    ENERGY_ADE_BOUNDARIES
+        LoD2/3: each zone's `nrg3:thermalBoundary` surfaces; a zone owns the ones it lists.
+    CITYGML_BUILDING_SHELL
+        LoD2/3: the building's `bldg:boundedBy` surfaces; the zone with
+        coincidesWithLod2Hull / coincidesWithLod3Hull = true owns them all.
+    RAW_SOLID_FALLBACK
+        LoD1: bare polygons, role from their direction. Each zone's own `nrg3:lod1Solid` when
+        a zone has one (a zone owns its own solid's faces), else the building's
+        `bldg:lod1Solid` (the only zone owns it all).
+    NONE
+        Nothing readable (e.g. a LoD0 footprint only); the building gets no IDF.
     """
-    ENERGY_ADE_BOUNDARIES = "energy_ade_boundaries"    # nrg3:ThermalZone -> thermalBoundary (RICH)
-    CITYGML_BUILDING_SHELL = "citygml_building_shell"  # bldg:boundedBy thematic surfaces (RICH)
-    RAW_SOLID_FALLBACK = "raw_solid_fallback"          # LoD1: lod1Solid faces, role by normal (POOR)
-    NONE = "none"                                      # no usable envelope (e.g. LoD0 footprint only)
+    ENERGY_ADE_BOUNDARIES = "energy_ade_boundaries"
+    CITYGML_BUILDING_SHELL = "citygml_building_shell"
+    RAW_SOLID_FALLBACK = "raw_solid_fallback"
+    NONE = "none"
 
 
 # Geometry selection — the building's ONE LoD (select_lod) decides where to look:
-#   LoD 1   -> the building's own LoD1 geometry;
+#   LoD 1   -> each zone's own lod1Solid when a zone has one, else the building's own LoD1
+#              geometry (which must be readable either way);
 #   LoD 2/3 -> the zones' thermalBoundary surfaces, else the bldg:boundedBy shell
 #              (a coincidesWithLodXHull zone has no thermalBoundary of its own);
 #   otherwise NONE — nothing usable (e.g. a LoD0 footprint-only building).
@@ -428,12 +515,18 @@ def select_surface_path(doc, building, lod):
     A LoD2/3 building is never read from its raw solid: Energy ADE Table 1 says that in LoD2
     and LoD3 "Thermal boundaries must be modelled via thematic surfaces" (special cases:
     "directly use thematic surfaces"). LoD1 has "No thermal boundaries", so it is read from
-    the building's own LoD1 geometry.
+    the building's own LoD1 geometry, or, when zones carry a LoD1 solid of their own
+    (Table 2, case 1.2), from those zone solids. The building's own LoD1 solid must be
+    readable either way: a zone face is exterior only when it is one of its polygons.
     """
     if lod == 1:
-        solid = _solid_faces(doc, building, lod)
-        if solid:
-            return SurfacePath.RAW_SOLID_FALLBACK, solid
+        block = _solid_faces(doc, building, lod)
+        if not block:
+            return SurfacePath.NONE, []
+        zone_faces = _zone_solid_faces(doc, building)
+        if zone_faces:
+            return SurfacePath.RAW_SOLID_FALLBACK, zone_faces
+        return SurfacePath.RAW_SOLID_FALLBACK, block
     elif lod in (2, 3):
         thermal = _thermal_boundary_surfaces(doc, building, lod)
         if thermal:
