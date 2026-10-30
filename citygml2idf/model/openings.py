@@ -1,8 +1,8 @@
 """
  windows  the window as geometry
-For each EXTERIOR wall, by the wall's LoD (ADE spec §4.3.1, Table 1):
-  LoD3 wall  explicit `bldg:Window` geometry (via `bldg:opening`) -> the real polygon; nothing else
-  LoD2 wall  `nrg3:bdgBdrySurfOpeningToSurfaceRatio` (WWR)       -> synthesize a window
+For each EXTERIOR wall, by the BUILDING's ONE LoD (Building.lod; ADE spec §4.3.1, Table 1):
+  LoD3       explicit `bldg:Window` geometry (via `bldg:opening`) -> the real polygon; nothing else
+  LoD2       `nrg3:bdgBdrySurfOpeningToSurfaceRatio` (WWR)       -> synthesize a window
              else `(totalSurfaceArea - opaqueSurfaceArea)/total`  -> synthesize a window
              else                                                 -> opaque (no window)
 
@@ -117,7 +117,7 @@ def explicit_windows(doc, wall_element, wall_points, origin_offset, window_const
     return found_windows
 
 # ============================================================================================
-# LoD2 WINDOWS Synthesizing :I
+# LoD2 WINDOWS Synthesizing :
 #
 #   * SHAPE  = one CENTRED window per wall, similar to the wall (scale = sqrt(ratio)).
 #              NOTE (possible future option): a horizontal STRIP at a fixed sill height —
@@ -219,7 +219,7 @@ def synthesize_window(wall_points, window_to_wall_ratio):
              center_z + scale * (corner[2] - center_z)] for corner in corners]
 
 
-def windows_for_wall(doc, wall_element, wall_points, origin_offset, window_constructions):
+def windows_for_wall(doc, wall_element, wall_points, origin_offset, window_constructions, lod):
     """One exterior wall -> its list of Window objects ([] = opaque).
 
     Parameters
@@ -234,6 +234,8 @@ def windows_for_wall(doc, wall_element, wall_points, origin_offset, window_const
         The building's recentring shift.
     window_constructions : dict
         The model's glazing pool, filled in place.
+    lod : int or None
+        The building's ONE LoD (Building.lod, from building_surfaces.select_lod).
 
     Returns
     -------
@@ -241,14 +243,15 @@ def windows_for_wall(doc, wall_element, wall_points, origin_offset, window_const
 
     Notes
     -----
-    LoD3 wall (geometry is bldg:lod3MultiSurface): windows come ONLY from its bldg:Window
-    objects. ADE spec §4.3.1: "For the opening(s), the corresponding CityGML classes (Window or
+    LoD3 building: windows come ONLY from the wall's bldg:Window objects. ADE spec §4.3.1: "For the opening(s), the corresponding CityGML classes (Window or
     Door) must be used"; Table 1: thermal openings "must be modelled (if they exist) via openings".
     A LoD3 wall without a Window has no window; the ratio is never used.
-    LoD2 wall: no opening objects exist (CityGML 2.0 §10.3.9 req. 8), so the window comes from
-    the surface's own attributes: bdgBdrySurfOpeningToSurfaceRatio, else (total - opaque) / total.
+    LoD2 building: no opening objects exist (CityGML 2.0 §10.3.9 req. 8), so the window comes
+    from the surface's own attributes: bdgBdrySurfOpeningToSurfaceRatio, else (total - opaque) /
+    total. The building decides, not the wall: a LoD2 wall that also carries a LoD3 copy is
+    still read as LoD2.
     """
-    if doc.children(wall_element, "bldg", "lod3MultiSurface"):        # LoD3: openings ONLY
+    if lod == 3:                                                      # LoD3: openings ONLY
         return explicit_windows(doc, wall_element, wall_points, origin_offset,
                                 window_constructions)
 
@@ -284,7 +287,7 @@ def resolve_windows(doc, middle):
 
             # for each exterior wall BoundarySurface, it calls windows_for_wall()
             windows = windows_for_wall(doc, wall_element, surface.points, origin_offset,
-                                       window_constructions)
+                                       window_constructions, building.lod)
             if windows:
                 surface.windows = windows
     middle.window_constructions = window_constructions

@@ -120,7 +120,7 @@ class Building:
     id: str
     zones: list = field(default_factory=list)            # list[Zone]
     surfaces: list = field(default_factory=list)         # list[Surface]
-    lod: Optional[int] = None                            # highest LoD present (info only)
+    lod: Optional[int] = None                            # the ONE LoD the building is read in
     surface_path: str = ""                               # which SurfacePath produced the surfaces
     origin_offset: Optional[list] = None                 # site min-corner shift undone at recentre
     provenance: dict = field(default_factory=dict)

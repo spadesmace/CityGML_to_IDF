@@ -1,21 +1,22 @@
 """
  read ONE building's envelope surfaces, whatever its LoD.
 
-Schema relationships decide which objects we read:
-  * Energy ADE ThermalZone -> explicit `thermalBoundary` surfaces when present;
-                              these are the zone surfaces EnergyPlus needs.
-  * Building shell         -> otherwise the building's labeled `bldg:boundedBy`
-                              thematic surfaces.
-  * Solid fallback         -> if no thematic surfaces exist, read raw solid faces.
+Schema relationships decide which objects we read, all in the building's ONE LoD (select_lod):
+  * LoD2/3: Energy ADE ThermalZone -> explicit `thermalBoundary` surfaces when present;
+                                      these are the zone surfaces EnergyPlus needs.
+  * LoD2/3: Building shell         -> otherwise the building's labeled `bldg:boundedBy`
+                                      thematic surfaces (a coincidesWithLodXHull zone).
+  * LoD1:   the building's own lod1Solid / lod1MultiSurface faces.
 
-LoD is only used inside those objects to choose a valid geometry representation.
+A building may carry several LoDs at once; it is read in ONE, never one LoD per surface.
 
 SCOPE: ONE `bldg:Building` = ONE IDF. `bldg:BuildingPart` is not supported — we read the Building
 itself and nothing below it.
 
 Either way we return ONE uniform list of surface dicts:
     {source_id, type_name, role, surface_type, boundary, points}
-so zones / openings / constructions / writer never care what LoD the file was.
+so zones / constructions / writer never care what LoD the file was (openings reads only
+Building.lod: Window objects in LoD3, ratio / areas in LoD2).
 
 Kept deliberately small and reference-tolerant (surfaces may be inline OR an
 `xlink`) Recentring to a
@@ -35,22 +36,6 @@ from ..geometry import rings, classify
 from ..model.citygml_read import _child_text
 from ..model.model import Surface
 from . import surface_types
-
-# LoD metadata is informational only. The parser still chooses geometry by schema
-# path in surfaces_of_building(), but this detects the highest LoD present whether
-# it is on the Building's own solid OR on its bldg:boundedBy / thermalBoundary
-# surfaces, both of which are valid in CityGML/Energy ADE.
-def detect_lod(doc, building):
-    """Highest LoD present on the building (3, 2, 1, 0) or None; recorded for info."""
-    for n in (3, 2, 1):
-        if doc.children(building, "bldg", f"lod{n}Solid") or doc.children(building, "bldg", f"lod{n}MultiSurface"):
-            return n
-        if _holder_has_surface_lod(doc, building, n):
-            return n
-    if doc.children(building, "bldg", "lod0FootPrint") or doc.children(building, "bldg", "lod0RoofEdge"):
-        return 0
-    return None
-
 
 def _lod_multisurface(doc, element, lod):
     """The `bldg:lod{lod}MultiSurface` geometry properties of one boundary surface.
@@ -79,29 +64,6 @@ def _lod_multisurface(doc, element, lod):
     return doc.children(element, "bldg", f"lod{lod}MultiSurface")
 
 
-def _holder_has_surface_lod(doc, holder, lod):
-    """True when any shell/thermal boundary surface has a bldg:lodNMultiSurface.
-
-    CityGML's building.xsd allows LoD geometry on BoundarySurface objects under
-    bldg:boundedBy. Energy ADE's ThermalZoneType also allows thermalBoundary
-    surfaces with their own LoD geometry. This keeps building['lod'] meaningful
-    for both the normal thermalBoundary path and coincidesWithLodXHull path.
-    """
-    for boundary_property in doc.children(holder, "bldg", "boundedBy"):
-        surf = doc.property_object(boundary_property)
-        if surf is not None and _lod_multisurface(doc, surf, lod):
-            return True
-    for zone_property in doc.children(holder, "nrg", "thermalZone"):
-        zone = doc.property_object(zone_property)
-        if zone is None:
-            continue
-        for boundary_property in doc.children(zone, "nrg", "thermalBoundary"):
-            surf = doc.property_object(boundary_property)
-            if surf is not None and _lod_multisurface(doc, surf, lod):
-                return True
-    return False
-
-
 # EVERY CityGML/ADE relationship is a PROPERTY wrapper holding an OBJECT — either nested inline
 #     <bldg:boundedBy><bldg:WallSurface .../></bldg:boundedBy>
 # or pointed at by reference
@@ -109,18 +71,38 @@ def _holder_has_surface_lod(doc, holder, lod):
 # `doc.property_object(prop)` (xml_io) opens either form and returns the object. It is the ONE
 # resolver used everywhere; there are no local aliases for it.
 
-# BoundarySurface -> lod3MultiSurface/lod2MultiSurface -> gml:surfaceMember -> gml:Polygon -> posList
-# Checks only the surface's OWN bldg:lod{3,2}MultiSurface children (_lod_multisurface), so it
+# BoundarySurface -> lod{lod}MultiSurface -> gml:surfaceMember -> gml:Polygon -> posList
+# Checks only the surface's OWN bldg:lod{lod}MultiSurface child (_lod_multisurface), so it
 # never grabs a window's ring.
-def _surface_rings(doc, surf):
-    """The exterior ring(s) of a boundary surface's own lodNMultiSurface (LoD3 then LoD2).
+def _surface_rings(doc, surf, lod):
+    """The exterior ring(s) of a boundary surface's own `bldg:lod{lod}MultiSurface`.
 
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    surf : lxml element
+        A boundary surface (`bldg:WallSurface`, ... or one of the 4 Energy ADE surface classes).
+    lod : int
+        The building's ONE LoD (select_lod): 2 or 3.
+
+    Returns
+    -------
+    list
+        The readable rings, in file order; [] when the surface has none in this LoD.
+
+    Warns
+    -----
+    When the surface has no geometry in this LoD, an empty property / dangling xlink, or no
+    readable polygon. The surface is then skipped: a gap is never filled from another LoD.
+
+    Notes
+    -----
     THE GEOMETRY MAY BE SHARED BY REFERENCE at EITHER of two levels. Energy ADE §4.3.2 lets a
     thermal boundary that coincides with its thematic twin POINT AT that geometry instead of
     duplicating the coordinates — and the xlink can sit on either element:
 
-      1. PROPERTY level   <bldg:lod2MultiSurface 
-      ematic_surface"/>
+      1. PROPERTY level   <bldg:lod2MultiSurface xlink:href="#MS_of_thematic_surface"/>
                           the property tag is EMPTY; the gml:MultiSurface lives elsewhere.
       2. MEMBER level     <bldg:lod2MultiSurface><gml:MultiSurface>
                               <gml:surfaceMember xlink:href="#polygon_of_thematic_surface"/>
@@ -129,22 +111,20 @@ def _surface_rings(doc, surf):
     So RESOLVE the property into its geometry object first (property_object handles inline AND
     xlink); xml_io.surface_polygons then follows the members (inline or xlink) to the polygons.
     """
-    for n in (3, 2):
-        geometry_property = _lod_multisurface(doc, surf, n)
-        if not geometry_property:
-            continue
-        geometry = doc.property_object(geometry_property[0])   # inline OR xlink -> the geometry
-        if geometry is None:                                   # never drop a face in silence
-            xml_io.warn(f"surface {surf.get(GML_ID)}: lod{n}MultiSurface carries no geometry "
-                        f"(empty property or dangling xlink); no surface emitted")
-            return []
-        rings_out = [ring for _, ring in xml_io.surface_polygons(doc, geometry) if ring]
-        if rings_out:
-            return rings_out
-        xml_io.warn(f"surface {surf.get(GML_ID)}: lod{n}MultiSurface has no readable polygon; "
-                    f"no surface emitted")
+    geometry_property = _lod_multisurface(doc, surf, lod)
+    if not geometry_property:
+        xml_io.warn(f"surface {surf.get(GML_ID)}: no lod{lod}MultiSurface; no surface emitted")
         return []
-    return []
+    geometry = doc.property_object(geometry_property[0])   # inline OR xlink -> the geometry
+    if geometry is None:                                   # never drop a face in silence
+        xml_io.warn(f"surface {surf.get(GML_ID)}: lod{lod}MultiSurface carries no geometry "
+                    f"(empty property or dangling xlink); no surface emitted")
+        return []
+    rings_out = [ring for _, ring in xml_io.surface_polygons(doc, geometry) if ring]
+    if not rings_out:
+        xml_io.warn(f"surface {surf.get(GML_ID)}: lod{lod}MultiSurface has no readable polygon; "
+                    f"no surface emitted")
+    return rings_out
 
 
 def _unique_ids(*ids):
@@ -218,8 +198,8 @@ def _fallback_context_ids(doc, building):
 # must not duplicate thermalBoundary objects; we read bldg:boundedBy surfaces.
 
 #Building -> bldg:boundedBy -> WallSurface/RoofSurface/GroundSurface
-def _labeled_surfaces(doc, building):
-    """Building shell path: each bldg:boundedBy BoundarySurface."""
+def _labeled_surfaces(doc, building, lod):
+    """Building shell path: each bldg:boundedBy BoundarySurface, read in the building's LoD."""
     out = []
     contexts = _fallback_context_ids(doc, building)
     for bb in doc.children(building, "bldg", "boundedBy"):
@@ -227,7 +207,7 @@ def _labeled_surfaces(doc, building):
         if surf is None:
             continue
         sid = surf.get(GML_ID)
-        out.extend(_surface_records(local_name(surf), sid, _surface_rings(doc, surf), contexts))
+        out.extend(_surface_records(local_name(surf), sid, _surface_rings(doc, surf, lod), contexts))
     return out
 
 
@@ -267,10 +247,68 @@ def coincides_with_hull(doc, zone):
     return False
 
 
+def select_lod(doc, building):
+    """The ONE LoD a building is read in.
+
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    building : lxml element
+        A `bldg:Building`.
+
+    Returns
+    -------
+    int or None
+        3, 2 or 1. None when no LoD can be read; the building then gets no IDF.
+
+    Notes
+    -----
+    A building may be written in several LoDs at once (CityGML 2.0 §6.2; building.xsd gives
+    every boundary surface an optional lod2MultiSurface AND lod3MultiSurface). One IDF is one
+    thermal model, so the whole building is read in ONE LoD, never one LoD per surface:
+
+    1. a zone with coincidesWithLod3Hull = true -> 3; coincidesWithLod2Hull = true -> 2
+       (Energy ADE §4.3.1: the zone is "the external hull resulting from the union of all
+       LoD2 thematic surfaces"; the LoD3 case is "conceptually similar");
+    2. else the zones' thermal boundaries -> the highest LoD that EVERY boundary has; None
+       when they share no LoD (a gap is never filled from another LoD);
+    3. else the building's own lod1Solid / lod1MultiSurface -> 1 (Energy ADE Table 1, LoD1:
+       "No thermal boundaries").
+    """
+    zones = [doc.property_object(prop) for prop in doc.children(building, "nrg", "thermalZone")]
+    zones = [zone for zone in zones if zone is not None]
+
+    # 1. a hull flag names the LoD
+    for lod in (3, 2):
+        for zone in zones:
+            if _child_text(doc, zone, "nrg", f"coincidesWithLod{lod}Hull") == "true":
+                return lod
+
+    # 2. thermal boundaries: the highest LoD that every boundary has
+    boundaries = []
+    for zone in zones:
+        for prop in doc.children(zone, "nrg", "thermalBoundary"):
+            surface = doc.property_object(prop)
+            if surface is not None:
+                boundaries.append(surface)
+    if boundaries:                       # checked first: all([]) would be True
+        for lod in (3, 2):
+            if all(_lod_multisurface(doc, surface, lod) for surface in boundaries):
+                return lod
+        return None
+
+    # 3. LoD1: no boundaries, the building's own LoD1 geometry
+    if (doc.children(building, "bldg", "lod1Solid")
+            or doc.children(building, "bldg", "lod1MultiSurface")):
+        return 1
+    return None
+
+
 # Normal LoD2/LoD3 ADE path: Building -> ThermalZone -> thermalBoundary -> BoundarySurface
 # This is used only when the zone does NOT declare coincidesWithLodXHull=true.
 # When the flag is true, _labeled_surfaces() reads the normal building shell.
-def _thermal_boundary_surfaces(doc, building):
+def _thermal_boundary_surfaces(doc, building, lod):
     """Energy ADE path: explicit zone boundary surfaces under ThermalZone.
 
     thermalBoundary has the same CityGML property pattern as boundedBy: the
@@ -294,24 +332,47 @@ def _thermal_boundary_surfaces(doc, building):
             if sid in seen:                      # the same surface reached twice (xlink)
                 continue
             seen.add(sid)
-            out.extend(_surface_records(local_name(surf), sid, _surface_rings(doc, surf), contexts))
+            out.extend(_surface_records(local_name(surf), sid, _surface_rings(doc, surf, lod), contexts))
     return out
 
 
 def _geometry_property_objects(doc, building, lod):
+    """The building's own geometry in this LoD: its lodNSolid, else its lodNMultiSurface.
+
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    building : lxml element
+        A `bldg:Building`.
+    lod : int
+        The building's ONE LoD (here always 1).
+
+    Returns
+    -------
+    list
+        The solid geometry objects; else the multi-surface ones; [] when there is neither.
+
+    Notes
+    -----
+    CityGML 2.0 §10.3.9, requirement 3: "For LOD1, either lod1Solid or lod1MultiSurface must
+    be used, but not both." A file that still has both is read from its solid only, so no face
+    is read twice.
+    """
     for local in (f"lod{lod}Solid", f"lod{lod}MultiSurface"):
-        for prop in doc.children(building, "bldg", local):
-            geom = doc.property_object(prop)
-            if geom is not None:
-                yield geom
+        geometries = [doc.property_object(prop) for prop in doc.children(building, "bldg", local)]
+        geometries = [geometry for geometry in geometries if geometry is not None]
+        if geometries:
+            return geometries              # the solid, else the multi-surface; never both
+    return []
 
-# Building -> lod1Solid/lod2Solid/lodXMultiSurface -> surfaceMember -> Polygon -> posList
-# Raw-solid fallback, mainly LoD1: classify selected solid faces by geometry
-# normal and attach ThermalZone/Building context ids for construction fallback.
+# Building -> lod1Solid (else lod1MultiSurface) -> surfaceMember -> Polygon -> posList
+# LoD1: classify the building's own faces by geometry normal and attach
+# ThermalZone/Building context ids for construction fallback.
 def _solid_faces(doc, building, lod):
-    """Raw selected-LoD geometry fallback.
+    """LoD1: the faces of the building's own LoD1 geometry (_geometry_property_objects).
 
-    Reads only the chosen bldg:lod{n}Solid / lod{n}MultiSurface containers ON THE BUILDING.
+    Reads only the building's own lod1Solid, else lod1MultiSurface, ON THE BUILDING.
     Deliberately NOT any descendant geometry — that would sweep in lod0FootPrint, a ThermalZone's
     own solid, a UsageZone solid, etc.
     """
@@ -335,27 +396,51 @@ class SurfacePath(Enum):
     """
     ENERGY_ADE_BOUNDARIES = "energy_ade_boundaries"    # nrg3:ThermalZone -> thermalBoundary (RICH)
     CITYGML_BUILDING_SHELL = "citygml_building_shell"  # bldg:boundedBy thematic surfaces (RICH)
-    RAW_SOLID_FALLBACK = "raw_solid_fallback"          # classify lodNSolid faces by normal (POOR)
+    RAW_SOLID_FALLBACK = "raw_solid_fallback"          # LoD1: lod1Solid faces, role by normal (POOR)
     NONE = "none"                                      # no usable envelope (e.g. LoD0 footprint only)
 
 
-# Geometry selection cascade — pick ONE source, most-detailed first:
-#   1. explicit ADE thermalBoundary surfaces (coincident-hull zones expose none);
-#   2. CityGML bldg:boundedBy shell surfaces (also the coincident-hull case);
-#   3. raw selected-LoD solid faces, mainly the LoD1 fallback;
+# Geometry selection — the building's ONE LoD (select_lod) decides where to look:
+#   LoD 1   -> the building's own LoD1 geometry;
+#   LoD 2/3 -> the zones' thermalBoundary surfaces, else the bldg:boundedBy shell
+#              (a coincidesWithLodXHull zone has no thermalBoundary of its own);
 #   otherwise NONE — nothing usable (e.g. a LoD0 footprint-only building).
 def select_surface_path(doc, building, lod):
-    """Return (SurfacePath, raw_records) for one building. NONE + [] when no source
-    yields surfaces, so the caller can still trace the building yet emit no IDF."""
-    thermal = _thermal_boundary_surfaces(doc, building) #  can be used: LOD2 - LOD3
-    if thermal:
-        return SurfacePath.ENERGY_ADE_BOUNDARIES, thermal
-    shell = _labeled_surfaces(doc, building) # LOD2 - LOD3
-    if shell:
-        return SurfacePath.CITYGML_BUILDING_SHELL, shell
-    solid = _solid_faces(doc, building, lod) #LOD1
-    if solid:
-        return SurfacePath.RAW_SOLID_FALLBACK, solid
+    """Where one building's surfaces come from, read in its ONE LoD.
+
+    Parameters
+    ----------
+    doc : xml_io.CityGMLDoc
+        The parsed CityGML file.
+    building : lxml element
+        A `bldg:Building`.
+    lod : int or None
+        The building's ONE LoD (select_lod).
+
+    Returns
+    -------
+    tuple
+        (SurfacePath, raw records). NONE + [] when nothing is readable, so the caller can
+        still trace the building yet emit no IDF.
+
+    Notes
+    -----
+    A LoD2/3 building is never read from its raw solid: Energy ADE Table 1 says that in LoD2
+    and LoD3 "Thermal boundaries must be modelled via thematic surfaces" (special cases:
+    "directly use thematic surfaces"). LoD1 has "No thermal boundaries", so it is read from
+    the building's own LoD1 geometry.
+    """
+    if lod == 1:
+        solid = _solid_faces(doc, building, lod)
+        if solid:
+            return SurfacePath.RAW_SOLID_FALLBACK, solid
+    elif lod in (2, 3):
+        thermal = _thermal_boundary_surfaces(doc, building, lod)
+        if thermal:
+            return SurfacePath.ENERGY_ADE_BOUNDARIES, thermal # Hull :False
+        shell = _labeled_surfaces(doc, building, lod)
+        if shell:
+            return SurfacePath.CITYGML_BUILDING_SHELL, shell # Hull:True
     return SurfacePath.NONE, []
 
 
@@ -442,14 +527,14 @@ def surfaces_of_building(doc, building):
     Returns
     -------
     lod : int or None
-        Highest LoD present (information only).
+        The ONE LoD the building is read in (select_lod); None when no LoD is readable.
     path : SurfacePath
         WHICH source the surfaces came from; kept on the Building for audit.
     surfaces : list of Surface
         [] when no source yields a readable surface (e.g. LoD0 only). The building stays
         in the Model, gets no IDF, and model/reader.py warns ONCE about it.
     """
-    lod = detect_lod(doc, building)
+    lod = select_lod(doc, building)
     path, raw = select_surface_path(doc, building, lod)
     return lod, path, process_surfaces(raw)
 
