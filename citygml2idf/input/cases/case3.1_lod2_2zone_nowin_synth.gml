@@ -481,7 +481,7 @@
 					<!-- THE SLAB, lower zone's face. Winding CCW seen from ABOVE, so its
 					     normal points UP = away from the LOWER zone -> E+ Ceiling.
 					     Construction = the BASE LayeredConstruction.
-					     relatedTo relationType="adjacent" -> its twin in the UPPER zone. -->
+					     relatedTo relationType="adjacentTo" -> its twin in the UPPER zone. -->
 					<nrg3:thermalBoundary>
 						<nrg3:IntermediateFloorSurface gml:id="Case31_tb_low_ifloor">
 							<gml:name>Intermediate floor, LOWER zone face (its ceiling)</gml:name>

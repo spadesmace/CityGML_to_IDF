@@ -94,12 +94,13 @@ def build_middle_layer(doc, detailed_interior=False):
 
     # These modules enrich the same Model in place (parser concerns). adjacency reads the
     # schema-native FACTS (isAdiabatic / relatedTo-adjacentTo) onto each Surface; zones then
-    # turns zone ownership + those facts into the EnergyPlus boundary. 
-    # NOTE interzone windows (not modelled): openings runs BEFORE zones, so a window is attached
+    # turns zone ownership + those facts into the EnergyPlus boundary. openings runs LAST: a
+    # window goes only on a surface whose FINAL boundary is Outdoors (EnergyPlus refuses a
+    # window on an adiabatic surface).
     constructions.resolve_all(doc, model)
-    openings.resolve_windows(doc, model)
     adjacency.attach_facts(doc, model)
     zones.assign_zones(doc, model, detailed_interior=detailed_interior)
+    openings.resolve_windows(doc, model)
 
     for bld in model.buildings:                       # the ONE warning per building without IDF
         if not bld.surfaces:

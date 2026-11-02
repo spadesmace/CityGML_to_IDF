@@ -86,8 +86,8 @@ def owns_whole_lod1_hull(doc, building, zone_elements, zone_element):
     #       coincidesWithLodXHull is a LoD2/LoD3 concept, so an LoD1 zone can state its
     #       ownership by NEITHER mechanism. The single zone IS the thermal hull.
     # GUARDS (we never guess):
-    #   * exactly ONE zone — with several zones and no boundaries, ownership must come
-    #     from each zone's own nrg3:lodXSolid, which is not implemented (case 1.2);
+    #   * exactly ONE zone — several LoD1 zones each own the faces of their own
+    #     nrg3:lod1Solid instead (`solid_polygon_ids`); without one they own nothing;
     #   * the surfaces came from the RAW SOLID path — a labeled LoD2/LoD3 shell whose zone
     #     forgot coincidesWithLodXHull is a FILE error, and must keep warning, not be guessed.
     if len(zone_elements) != 1:

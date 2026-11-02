@@ -1,8 +1,8 @@
 """
 geometry/rings.py — pure math on one polygon ring (a list of (x, y, z) points).
 
-No XML and no EnergyPlus here: the readers hand in points, these functions return numbers or
-re-ordered points. A ring's DIRECTION is its vertex order (GML3 / CityGML 2.0: counter-clockwise
+No XML and no EnergyPlus here: the readers hand in points, these functions return numbers,
+True/False, or points. A ring's DIRECTION is its vertex order (GML3 / CityGML 2.0: counter-clockwise
 seen from the side the normal points to), and EnergyPlus GlobalGeometryRules uses the same rule.
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-
+# E+ wants each corner once
 def drop_closing_point(points):
     """The ring without its repeated last point.
 
@@ -34,7 +34,7 @@ def drop_closing_point(points):
         return [tuple(p) for p in points[:-1]]
     return [tuple(p) for p in points]
 
-
+# get the direction of each surface
 def normal_vector(points):
     """The ring's normal by Newell's method, NOT scaled to length 1.
 
@@ -86,6 +86,7 @@ def polygon_area(points):
     return 0.5 * float(np.linalg.norm(normal_vector(points)))
 
 
+# To compare direction roof UP , floor Down, wall side!! 
 def unit_normal(points):
     """The ring's normal scaled to length 1.
 
@@ -103,7 +104,7 @@ def unit_normal(points):
     length = np.linalg.norm(n)
     return n / length if length > 0 else n
 
-
+# TO move building to (0,0,0) instead of  reprojection  for GlobalGeometry World E+
 def min_corner(ring_list):
     """The lowest x, y and z over every point of several rings.
 
@@ -121,9 +122,9 @@ def min_corner(ring_list):
     allpts = np.array([p for ring in ring_list for p in ring], dtype=float)
     return allpts.min(axis=0)
 
-
-def bounding_rectangle(points):
-    """The polygon's bounding rectangle in its own plane, for a ring with more than 4 vertices.
+# It read all windows's points 
+def same_area_quad(points):
+    """A window ring with more than 4 corners turned into a rectangle of the same area.
 
     Parameters
     ----------
@@ -133,39 +134,59 @@ def bounding_rectangle(points):
     Returns
     -------
     list of tuple
-        The ring itself when it has 3 or 4 vertices (or no area); otherwise the 4 corners of
-        its in-plane bounding rectangle, wound the same way as the input.
+        The ring itself when it has 3 or 4 corners (or no area). Otherwise the 4 corners of a
+        rectangle in the window's own plane: centred on the box around the window, with the
+        window's own area, facing the same way.
 
     Notes
     -----
-    EnergyPlus FenestrationSurface:Detailed allows 3 or 4 vertices (IDD N3, maximum 4), so a
-    window with more corners (e.g. an arch) is replaced by the rectangle that contains it.
+    EnergyPlus FenestrationSurface:Detailed allows 3 or 4 vertices (IDD N3, maximum 4).
+    Keeping the area keeps the glass area the file states. A big window under a sloped
+    edge can reach past the edge of its wall.
     """
-    pts = drop_closing_point(points)
-    if len(pts) <= 4:
-        return [tuple(float(c) for c in p) for p in pts]
-    normal = unit_normal(pts)
-    if float(np.linalg.norm(normal)) == 0.0:
-        return [tuple(float(c) for c in p) for p in pts]
-    pts_arr = np.array(pts, dtype=float)
-    origin = pts_arr[0]
-    # two axes u, v inside the polygon's plane: any direction not parallel to the normal,
-    # minus its normal part, gives u; v = normal x u completes the right-handed pair
-    ref = np.array([1.0, 0.0, 0.0]) if abs(float(np.dot(normal, [1.0, 0.0, 0.0]))) < 0.9 \
-        else np.array([0.0, 1.0, 0.0])
-    u = ref - float(np.dot(ref, normal)) * normal
-    u /= np.linalg.norm(u)
-    v = np.cross(normal, u)
-    coords = [(float((p - origin) @ u), float((p - origin) @ v)) for p in pts_arr]
-    min_u, max_u = min(a for a, _ in coords), max(a for a, _ in coords)
-    min_v, max_v = min(b for _, b in coords), max(b for _, b in coords)
-    corners = [(min_u, min_v), (max_u, min_v), (max_u, max_v), (min_u, max_v)]
-    rectangle = [origin + a * u + b * v for (a, b) in corners]
-    if float(np.dot(unit_normal(rectangle), normal)) < 0.0:      # keep the input's winding
+    corners = drop_closing_point(points)
+    if len(corners) <= 4:
+        return [(float(x), float(y), float(z)) for (x, y, z) in corners]
+    normal = unit_normal(corners)
+    if float(np.linalg.norm(normal)) == 0.0:          # no area: nothing to turn into a rectangle
+        return [(float(x), float(y), float(z)) for (x, y, z) in corners]
+
+    # 1. two directions lying flat in the window's plane: "across" (level) and "up"
+    across = np.cross([0.0, 0.0, 1.0], normal)
+    if float(np.linalg.norm(across)) < 1e-9:          # a flat window (skylight): use the x axis
+        across = np.array([1.0, 0.0, 0.0])
+    across = across / np.linalg.norm(across)
+    up = np.cross(normal, across)
+
+    # 2. how far each corner lies along "across" and "up", measured from the first corner
+    start = np.array(corners[0], dtype=float)
+    across_values = []
+    up_values = []
+    for corner in corners:
+        offset = np.array(corner, dtype=float) - start
+        across_values.append(float(np.dot(offset, across)))
+        up_values.append(float(np.dot(offset, up)))
+
+    # 3. the box around the window: its width, height and centre
+    width = max(across_values) - min(across_values)
+    height = max(up_values) - min(up_values)
+    centre = start + across * (min(across_values) + width / 2) + up * (min(up_values) + height / 2)
+
+    # 4. shrink the box about its centre until it has the window's own area
+    scale = float(np.sqrt(polygon_area(corners) / (width * height)))
+    half_across = across * (scale * width / 2)
+    half_up = up * (scale * height / 2)
+    rectangle = [centre - half_across - half_up,
+                 centre + half_across - half_up,
+                 centre + half_across + half_up,
+                 centre - half_across + half_up]
+
+    # 5. face the same way as the window
+    if float(np.dot(unit_normal(rectangle), normal)) < 0.0:
         rectangle = list(reversed(rectangle))
-    return [tuple(float(c) for c in p) for p in rectangle]
+    return [(float(x), float(y), float(z)) for (x, y, z) in rectangle]
 
-
+# ONLY for LOD3 WINDOW : Reverse corner if it faces against the parent wall 
 def face_like(points, reference_normal):
     """The ring wound so that its normal agrees with a reference normal.
 
@@ -193,3 +214,40 @@ def face_like(points, reference_normal):
         pts = list(reversed(pts))
         n = -n
     return pts, n
+
+
+# NOTE Used for LoD2 windows: the file gives only an opening ratio, so we draw the window
+# ourselves by shrinking the surface toward its middle. That only works on a surface with
+# no dent; a dented surface gets no drawn window.
+def is_convex(points):
+    """True when the ring has no dent (no corner pointing into the shape).
+
+    Parameters
+    ----------
+    points : sequence of (x, y, z)
+        A ring (closing point optional).
+
+    Returns
+    -------
+    bool
+        True = convex: walking around the ring, every corner turns the same way
+        (a rectangle, a triangle, a gable wall). False = concave: at least one corner
+        turns the other way, into the shape (an L-shaped roof). Corners on one straight
+        line count as convex.
+
+    Notes
+    -----
+    A LoD2 window is drawn by shrinking its surface toward the average of the corners;
+    the window stays inside the surface only when the surface is convex.
+    """
+    normal = unit_normal(points)
+    pts = drop_closing_point(points)
+    count = len(pts)
+    for i in range(count):
+        a = np.array(pts[i])
+        b = np.array(pts[(i + 1) % count])
+        c = np.array(pts[(i + 2) % count])
+        turn = np.cross(b - a, c - b)
+        if float(np.dot(turn, normal)) < -1e-9:
+            return False
+    return True

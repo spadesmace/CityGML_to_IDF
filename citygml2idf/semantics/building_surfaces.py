@@ -559,8 +559,8 @@ def process_surfaces(raw):
     must point outwards"; EnergyPlus GlobalGeometryRules uses the same rule (Counterclockwise,
     seen from outside). So the points pass through unchanged and the normal is read from them:
     it gives the LoD1 role (tilt, geometry/classify.py) and Floor vs Ceiling. No centre point
-    is used, so any shape works (L, T, U, courtyard, stepped). model/zones.py checks each zone
-    once (signed volume).
+    is used, so any shape works (L, T, U, courtyard, stepped). The winding is trusted, not
+    checked.
     """
     surfaces = []
     for type_name, sid, ring, construction_context_ids, source_gml_id in raw:
