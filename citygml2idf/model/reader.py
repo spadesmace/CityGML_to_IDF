@@ -1,17 +1,23 @@
 """
-Build the typed middle layer Model from CityGML parser output.
+model/reader.py — builds the ONE middle layer (model.Model) from a parsed CityGML file.
 
-The reader assembles buildings, zones, surfaces, windows, constructions, and
-materials into one Model. Objects also carry provenance for audit/teaching;
-IDF generation reads only the fields it needs.
+build_middle_layer runs the steps in this order; each changes the same Model in place:
+  1. building_surfaces.surfaces_of_building  each Building's ONE LoD and its Surface list
+  2. recentre                                each building moved to its own lowest corner
+                                             (one IDF per building; origin_offset keeps the shift)
+  3. constructions.resolve_all               every surface's construction and materials
+  4. adjacency.attach_facts                  isAdiabatic / relatedTo, read from the file
+  5. zones.assign_zones                      zones, ownership, boundaries
+  6. zone_physics.attach_zone_physics        a zone's own values (infiltration)
+  7. openings.resolve_windows                windows LAST: only on a surface whose FINAL
+                                             boundary is Outdoors
+Every object keeps a flat `provenance` map (the audit trail); the writer reads only the data
+fields. Coordinates are assumed metric; srsName / EPSG are kept for the record only.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import re
-import sys
 
 from ..citygml import xml_io
 from ..citygml.xml_io import GML_ID
@@ -20,22 +26,22 @@ from ..semantics import building_surfaces
 from . import adjacency
 from . import constructions
 from . import openings
+from . import zone_physics
 from . import zones
-from .model import Building, Model, to_jsonable
-
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_PKG = os.path.dirname(_HERE)                       # citygml2idf/
-OUTPUT_DIR = os.path.join(_PKG, "output")
+from .model import Building, Model
 
 
 def _parse_epsg(srs_name):
-    """Extract a trailing EPSG code from srsName for audit only."""
+    """The trailing EPSG code of srsName, for the record only; None when there is none."""
     if not srs_name:
         return None
     match = re.search(r"(\d+)\s*$", srs_name.strip())
-    return int(match.group(1)) if match else None
+    if match is None:
+        return None
+    return int(match.group(1))
 
-# One global store, parsed once
+
+# the ONE middle layer: every building parsed once
 def build_middle_layer(doc, detailed_interior=False):
     """Parse every building into the ONE typed middle layer (model.Model).
 
@@ -45,7 +51,7 @@ def build_middle_layer(doc, detailed_interior=False):
         The parsed CityGML file.
     detailed_interior : bool, optional
         False (default) = FAST indoor model (interior faces Adiabatic); True = model
-        interior heat transfer (model/zones.py, boundary rung 0).
+        interior heat transfer (model/zones.py, boundary rung 1).
 
     Returns
     -------
@@ -58,79 +64,44 @@ def build_middle_layer(doc, detailed_interior=False):
     model/zones.py (``building.provenance["skipped"]``). Such a building stays in the Model
     for the audit trail; the writer skips it because it has no surfaces.
     """
-    # 1. geometry + roles per building (points still in the file's CRS)
+    # 1. each building's ONE LoD and its surfaces (points still in the file's coordinates)
     buildings = []
-    for b in xml_io.buildings(doc):
-        lod_n, surface_path, surfaces = building_surfaces.surfaces_of_building(doc, b)
-        buildings.append(Building(id=b.get(GML_ID), lod=lod_n,
+    for building_element in xml_io.buildings(doc):
+        lod_n, surface_path, surfaces = building_surfaces.surfaces_of_building(doc, building_element)
+        buildings.append(Building(id=building_element.get(GML_ID), lod=lod_n,
                                   surface_path=surface_path.value, surfaces=surfaces))
 
-    # 2. Assume input coordinates are already metric; record srsName/EPSG for audit.
-    src_epsg = _parse_epsg(xml_io.srs_name(doc))
-    for bld in buildings:
-        for s in bld.surfaces:
-            s.points = [(float(x), float(y), float(z)) for (x, y, z) in s.points]
-
-    # 3. recentre EACH building to its own origin (one IDF per building) and
+    # 2. recentre EACH building to its own origin (one IDF per building) and
     #    record the shift so we still know the building's true site position.
-    for bld in buildings:
-        rings_m = [s.points for s in bld.surfaces]
-        if not rings_m:
+    for building in buildings:
+        surface_rings = [surface.points for surface in building.surfaces]
+        if not surface_rings:
             continue
-        ox, oy, oz = rings.min_corner(rings_m)
-        for s in bld.surfaces:
-            s.points = [[float(x - ox), float(y - oy), float(z - oz)]
-                        for (x, y, z) in s.points]
-            s.area = round(rings.polygon_area(s.points), 3)  # computed from the polygon points
-            s.provenance["points"] = ("gml:posList (assumed metric) -> file winding kept "
-                                      "-> recentre to building origin "
-                                      f"{[round(float(ox), 1), round(float(oy), 1), round(float(oz), 1)]}")
-            s.provenance["area"] = f"{s.area} m2 (derived from recentred points)"
-        bld.origin_offset = [float(ox), float(oy), float(oz)]
+        ox, oy, oz = rings.min_corner(surface_rings)
+        for surface in building.surfaces:
+            surface.points = [[float(x - ox), float(y - oy), float(z - oz)]
+                              for (x, y, z) in surface.points]
+            surface.area = round(rings.polygon_area(surface.points), 3)  # from the polygon points
+            surface.provenance["points"] = ("gml:posList (assumed metric) -> file winding kept "
+                                            "-> recentre to building origin "
+                                            f"{[round(float(ox), 1), round(float(oy), 1), round(float(oz), 1)]}")
+            surface.provenance["area"] = f"{surface.area} m2 (derived from recentred points)"
+        building.origin_offset = [float(ox), float(oy), float(oz)]
 
-    model = Model(crs={"srsName": xml_io.srs_name(doc), "epsg": src_epsg,
+    srs_name = xml_io.srs_name(doc)              # coordinates assumed metric; kept for the record
+    model = Model(crs={"srsName": srs_name, "epsg": _parse_epsg(srs_name),
                        "units": "assumed_metric"},
                   buildings=buildings)
 
-    # These modules enrich the same Model in place (parser concerns). adjacency reads the
-    # schema-native FACTS (isAdiabatic / relatedTo-adjacentTo) onto each Surface; zones then
-    # turns zone ownership + those facts into the EnergyPlus boundary. openings runs LAST: a
-    # window goes only on a surface whose FINAL boundary is Outdoors (EnergyPlus refuses a
-    # window on an adiabatic surface).
-    constructions.resolve_all(doc, model)
-    adjacency.attach_facts(doc, model)
-    zones.assign_zones(doc, model, detailed_interior=detailed_interior)
-    openings.resolve_windows(doc, model)
+    constructions.resolve_all(doc, model)                                  # 3.
+    adjacency.attach_facts(doc, model)                                     # 4.
+    zones.assign_zones(doc, model, detailed_interior=detailed_interior)    # 5.
+    zone_physics.attach_zone_physics(doc, model)                           # 6.
+    openings.resolve_windows(doc, model)                                   # 7. LAST: final boundaries
 
-    for bld in model.buildings:                       # the ONE warning per building without IDF
-        if not bld.surfaces:
-            reason = bld.provenance.setdefault(
-                "skipped", f"no readable surface (surface_path={bld.surface_path})")
-            xml_io.warn(f"building {bld.id}: no IDF written; {reason}")
+    for building in model.buildings:                  # the ONE warning per building without IDF
+        if not building.surfaces:
+            reason = building.provenance.setdefault(
+                "skipped", f"no readable surface (surface_path={building.surface_path})")
+            xml_io.warn(f"building {building.id}: no IDF written; {reason}")
     return model
-
-
-def _demo(path=None):
-    doc = xml_io.CityGMLDoc(path)
-    model = build_middle_layer(doc)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUTPUT_DIR, "middle_layer.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(model, f, indent=2, default=to_jsonable)
-
-    c = model.crs
-    print(f"CRS: {c['srsName']}  epsg={c['epsg']}  units={c['units']}")
-    for bld in model.buildings:
-        n = len(bld.surfaces)
-        total = round(sum(s.area for s in bld.surfaces), 1)
-        print(f"  {bld.id:<12} LOD{bld.lod}  {n:>2} surfaces  envelope={total} m^2"
-              f"  site_origin={[round(v, 1) for v in (bld.origin_offset or [])]}")
-    if model.buildings and model.buildings[0].surfaces:
-        s0 = model.buildings[0].surfaces[0]
-        print(f"  e.g. {s0.source_id}: {s0.surface_type}/{s0.boundary} "
-              f"area={s0.area} pts[0]={s0.points[0]}")
-    print(f"  model -> {out_path}")
-
-
-if __name__ == "__main__":
-    _demo(sys.argv[1] if len(sys.argv) > 1 else None)

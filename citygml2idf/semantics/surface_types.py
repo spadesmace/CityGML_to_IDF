@@ -1,19 +1,20 @@
+"""CityGML / Energy ADE surface type -> role, E+ Surface_Type and DEFAULT boundary.
+
+Sources: CityGML 2.0 building module (the bldg: boundary surfaces), Energy ADE §4.3.2 (the
+four nrg3: surfaces), IDD BuildingSurface:Detailed A2 Surface Type / A6 Outside Boundary
+Condition. model/zones.py decides the final boundary (faces between zones).
+"""
 
 from __future__ import annotations
 
 from collections import namedtuple
 
 # role         = our writer-neutral label, kept in the middle layer
-# surface_type = EnergyPlus Surface_Type: "Wall" | "Roof" | "Floor" | "Ceiling"
-#                | "FloorOrCeiling" = a DECISION, not a TO DO: a horizontal interface is
-#                  a Ceiling to the zone below and a Floor to the zone above, so the
-#                  type NAME cannot fix it — the GEOMETRY does. Resolved at runtime from
-#                  the outward normal (up->Ceiling, down->Floor) in resolve_floor_ceiling,
-#                  and flipped for the partner of an interzone pair in zones.py.
-# boundary     = Outside_Boundary_Condition: "Outdoors" | "Ground" | "Adiabatic"
-#                NOTE This is the DEFAULT for a single-owner / single-zone face. For a
-#                face SHARED by two modelled zones, model/zones.py OVERRIDES this to
-#                "Surface" and adds an explicit reciprocal partner
+# surface_type = E+ Surface_Type: "Wall" | "Roof" | "Floor" | "Ceiling", or "FloorOrCeiling"
+#                for a slab: its type name cannot say which, its own normal does
+#                (resolve_floor_ceiling)
+# boundary     = the DEFAULT Outside_Boundary_Condition: "Outdoors" | "Ground" | "Adiabatic";
+#                model/zones.py decides the final one (e.g. "Surface" for a pair between zones)
 SurfaceRule = namedtuple("SurfaceRule", ["role", "surface_type", "boundary"])
 
 
@@ -28,35 +29,33 @@ SURFACE_TYPES = {
     "OuterFloorSurface":   SurfaceRule("outer_floor",   "Roof",  "Outdoors"),
     "OuterCeilingSurface": SurfaceRule("outer_ceiling", "Floor", "Outdoors"),
 
-    # ---- Energy ADE 3.0 (nrg3:) interior interfaces
+    # ---- Energy ADE 3.0 (nrg3:) interior interfaces, §4.3.2
     "PartyWallSurface":         SurfaceRule("party_wall",        "Wall",          "Adiabatic"),
     "IntermediateFloorSurface": SurfaceRule("intermediate_floor","FloorOrCeiling","Adiabatic"),
     "AtticFloorSurface":        SurfaceRule("attic_floor",       "FloorOrCeiling","Adiabatic"),
     "BasementCeilingSurface":   SurfaceRule("basement_ceiling",  "FloorOrCeiling","Adiabatic"),
 
-    # ---- CityGML 2.0 (bldg:)
+    # ---- CityGML 2.0 (bldg:) interior types: LoD4 only in CityGML 2.0 (OGC 12-019), kept
     "FloorSurface":        SurfaceRule("interior_floor",   "FloorOrCeiling", "Adiabatic"),  # interior floor between storeys
     "CeilingSurface":      SurfaceRule("interior_ceiling", "FloorOrCeiling", "Adiabatic"),  # interior ceiling between storeys
     "InteriorWallSurface": SurfaceRule("interior_wall",    "Wall",           "Adiabatic"),  # interior partition wall
-    
-    # "ClosureSurface":      SurfaceRule( ... ),  # Not  decide (+ a default construction)
-  
+
+    # ClosureSurface is not mapped: building_surfaces classifies it by its normal + a warning
 }
 
 
-# For the LOD1 fallback: geometry.classify returns a generic ROLE ("wall" /
-# "roof" / "ground") instead of a type name. Those exterior roles reuse the same
-# EnergyPlus rule as their named CityGML counterparts.
+# A face classified by its direction (geometry/classify.py: a LoD1 face, or a type that is not
+# mapped) takes the rule of its named CityGML counterpart.
 ROLE_RULES = {
     "wall":   SURFACE_TYPES["WallSurface"],
     "roof":   SURFACE_TYPES["RoofSurface"],
     "ground": SURFACE_TYPES["GroundSurface"],
 }
 
-# Interior zone-to-zone interfaces INSIDE one building. Only these are touched by the
-# detailed/fast indoor switch in model/zones.py (fast -> Adiabatic; detailed -> Surface pair).
-# Exterior Wall/Roof/Ground and LoD1 "classified" faces are never here, so the switch can
-# never make an outdoor face adiabatic.
+# Interior zone-to-zone interfaces INSIDE one building: the LoD2/3 faces between zones
+# (model/zones.py `_between_zones`; LoD1 faces have no type and use the xlink test there).
+# Exterior Wall/Roof/Ground are never here, so FAST mode can never make an outdoor face
+# adiabatic.
 INTERIOR_TYPES = frozenset({
     "PartyWallSurface", "IntermediateFloorSurface", "AtticFloorSurface",
     "BasementCeilingSurface", "FloorSurface", "CeilingSurface", "InteriorWallSurface",
@@ -69,32 +68,31 @@ def is_interior(type_name):
 
 
 def rule_for_type(type_name):
-    """SurfaceRule for a CityGML/ADE surface LOCAL name, or None when the type is
-    unknown/undecided (the caller warns and skips — never crashes)."""
+    """The SurfaceRule of a CityGML / ADE type name, or None when the type is not mapped."""
     return SURFACE_TYPES.get(type_name)
 
 
 def rule_for_role(role):
-    """SurfaceRule for a geometry-classified exterior role (LOD1 path), or None."""
+    """The SurfaceRule of a classify role ('wall' / 'roof' / 'ground'), or None."""
     return ROLE_RULES.get(role)
 
 
-def floor_or_ceiling(normal_z):
-    """The EnergyPlus Surface_Type of a HORIZONTAL face, from its OUTWARD normal's z:
-    normal pointing UP (the zone lies below the face) -> Ceiling; pointing DOWN -> Floor.
-
-    The SAME physical slab is a Ceiling to the zone BELOW it and a Floor to the zone
-    ABOVE it. In the Energy ADE each zone has its OWN surface for that slab, wound out of
-    that zone (the file's winding is kept), so each surface's own normal gives the answer."""
-    return "Ceiling" if normal_z > 0 else "Floor"
-
-
+#  only decides Floor versus Ceiling for slab-type surfaces
 def resolve_floor_ceiling(surface_type, normal_z):
-    """Turn a 'FloorOrCeiling' rule into a concrete EnergyPlus keyword using the
-    outward normal's z. Other surface_types pass through unchanged."""
+    """A 'FloorOrCeiling' rule as Ceiling (outward normal up) or Floor (down); any other
+    surface_type is returned unchanged.
+
+    Notes
+    -----
+    The same slab is a Ceiling to the zone below and a Floor to the zone above. Each zone writes
+    its own surface for it, wound out of that zone (the file's winding is kept), so each
+    surface's own normal gives the answer.
+    """
     if surface_type != "FloorOrCeiling":
         return surface_type
-    return floor_or_ceiling(normal_z)
+    if normal_z > 0:
+        return "Ceiling"
+    return "Floor"
 
 
 def sun_wind_exposure(boundary):

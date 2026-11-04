@@ -1,52 +1,27 @@
-"""
-xml_io.py — the ONLY module in citygml2idf that knows about lxml/XML.
+"""The ONLY module that touches lxml: load a CityGML file, follow references, read rings.
 
-Everything else (geometry, lod, surfaces, zones, openings, constructions) talks
-to CityGML through the small, clean API here. If we ever swap the XML library,
-this is the single file that changes.
-
-Two facts about CityGML drive this module's design:
-
-1. Match by NAMESPACE URI, never by prefix.
-   The file writes `bldg:WallSurface`, `nrg3:ThermalZone`, ... but those prefixes
-   are arbitrary — another exporter may call the Energy ADE `energy:` instead of
-   `nrg3:`. The URI (e.g. http://www.citygml.org/ade/energy/3.0) is the stable
-   contract, so we look elements up by URI. The URIs live in NS below = the ONE
-   place to edit for a different schema version.
-
-2. Geometry is shared by REFERENCE.
-   A LOD2/3 `gml:Solid` does not contain coordinates — it says
-   `<gml:surfaceMember xlink:href="#b2_ground"/>` and the actual polygon lives
-   under `bldg:boundedBy`. So on load we index every element that has a `gml:id`
-   into a registry, and `resolve()` follows an xlink in O(1).
-
-Run as a demo (from the repo root):
-    python -m citygml2idf.xml_io [path-to-citygml]
-prints the building list with each building's LOD + zone counts, and proves
-xlink resolution + posList parsing on one shared polygon.
+1. Match by namespace URI, never by prefix: a file may call the Energy ADE `energy:` instead
+   of `nrg3:`; the URI is the contract. The URIs live in NS, the one place to edit.
+2. Objects are shared by reference (xlink:href="#id", GML 3.1.1): every gml:id is indexed once
+   on load, and property_object reads any property inline or by xlink.
 """
 
 from __future__ import annotations
 
-import os
 import sys
-from urllib.parse import urlparse
 
 from lxml import etree
 
-# WHY: stable namespace URIs (see point 1 above). Prefixes here are just our own
-# short handles; the URIs are what actually match elements in any valid file.
+# Namespace URIs (point 1); the prefixes are only our short handles.
 NS = {
     "gml":   "http://www.opengis.net/gml",
     "core":  "http://www.opengis.net/citygml/2.0",
     "bldg":  "http://www.opengis.net/citygml/building/2.0",
-    "grp":   "http://www.opengis.net/citygml/cityobjectgroup/2.0",
-    "gen":   "http://www.opengis.net/citygml/generics/2.0",
     "nrg":   "http://www.citygml.org/ade/energy/3.0",
     "xlink": "http://www.w3.org/1999/xlink",
 }
 
-# WHY: these two attributes are read constantly; precompute their qualified form.
+# The two attributes read everywhere, in lxml's {uri}name form.
 XLINK_HREF = f"{{{NS['xlink']}}}href"
 GML_ID = f"{{{NS['gml']}}}id"
 
@@ -64,23 +39,10 @@ NAMED_OBJECTS = frozenset({
     "LayeredConstruction", "ReverseLayeredConstruction", "Layer", "SolidMaterial", "Gas",
 })
 
-# WHY: resolve data paths relative to the PACKAGE root (citygml2idf/), not this
-# file's folder — this module lives one level down in citygml/, while input/,
-# output/ and validation_file/ sit at the package root. Computing _PKG keeps the
-# paths correct no matter how deep we nest the readers.
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_PKG = os.path.dirname(_HERE)                      # citygml2idf/
 
-
-# WHY: robustness rule (carried over from the CityJSON work) — never crash
-# silently on imperfect input; surface problems as plain warnings and continue.
 def warn(msg):
+    """Print a warning and go on: bad input never stops the run."""
     print(f"[xml_io] WARNING: {msg}", file=sys.stderr)
-
-
-def qualified_name(prefix, local, ns=NS):
-    """('bldg', 'Building') -> '{http://...building/2.0}Building' (lxml's form)."""
-    return f"{{{ns[prefix]}}}{local}"
 
 
 def local_name(el):
@@ -89,27 +51,23 @@ def local_name(el):
 
 
 class CityGMLDoc:
-    """A loaded CityGML file plus the two things every other module needs:
-    a resolved namespace map and a gml:id -> element registry."""
+    """A loaded CityGML file: its namespaces and its gml:id -> element registry."""
 
-    def __init__(self, path): 
+    def __init__(self, path):
         if not path:
             raise SystemExit("CityGMLDoc: pass a CityGML/.gml path")
         self.path = path
-        # WHY: tolerant parser — strip insignificant whitespace, allow big trees,
-        # and do NOT fetch external entities (safer + faster).
+        # no external entities are fetched; big files are allowed
         parser = etree.XMLParser(remove_blank_text=True, huge_tree=True,
                                  resolve_entities=False)
         self.tree = etree.parse(path, parser)
         self.root = self.tree.getroot()
         self.ns = self._resolve_namespaces()
-        self._by_id = self._index_by_id() # read all gml:id
+        self._by_id = self._index_by_id()
 
     # --- setup -------------------------------------------------------------
     def _resolve_namespaces(self):
-        #  keep our stable URIs, but auto-adopt the file's actual Energy ADE
-        # URI if it targets a slightly different version — otherwise a new file
-        # could silently match nothing.
+        """NS, but with the file's own Energy ADE URI when it declares a different one."""
         ns = dict(NS)
         for uri in (self.root.nsmap or {}).values():
             if uri and "ade/energy" in uri:
@@ -155,19 +113,15 @@ class CityGMLDoc:
 
     # --- lookups -----------------------------------------------------------
     def qualified_name(self, prefix, local):
-        """Qualified name using THIS document's resolved namespaces."""
-        return qualified_name(prefix, local, self.ns)
+        """('bldg', 'Building') -> '{http://...building/2.0}Building', with this file's namespaces."""
+        return f"{{{self.ns[prefix]}}}{local}"
 
-    #Building under cityObjectMember and a Building under CityObjectGroup > groupMember are found identically
     def iter_type(self, prefix, local):
-        """Every element of a qualified type, anywhere in the tree (a generator)."""
+        """Every element of one type anywhere in the tree (a generator), e.g. a Building under
+        cityObjectMember or under a CityObjectGroup."""
         return self.root.iter(self.qualified_name(prefix, local))
 
-    def descendants(self, el, prefix, local):
-        """All matching elements at any depth under `el`."""
-        return el.findall(f".//{self.qualified_name(prefix, local)}")
-
-    def children(self, el, prefix, local): 
+    def children(self, el, prefix, local):
         """Immediate children only — matters when the same type can nest."""
         want = self.qualified_name(prefix, local)
         return [c for c in el if c.tag == want]
@@ -177,11 +131,10 @@ class CityGMLDoc:
         return self._by_id.get(gml_id)
 
     def resolve_xlink(self, el):
-        """Follow an element's xlink:href to the referenced element.
+        """The element an xlink:href points to, or None with a warning.
 
-        Same-document references normally look like '#id'. Some valid producer
-        files write a bare relative id ('id') instead, so we accept both when
-        the target exists in this document.
+        Accepts '#id' and a bare 'id' (some producers write it). A reference into another
+        file cannot be followed: one file is read at a time.
         """
         href = el.get(XLINK_HREF)
         if not href:
@@ -197,7 +150,7 @@ class CityGMLDoc:
         warn(f"external xlink href not resolvable locally: '{href}'")
         return None
 
-    def property_object(self, property_el): #generic resolver 
+    def property_object(self, property_el):
         """Return the object carried by a CityGML/ADE property element.
 
         XSD pattern, used everywhere in CityGML:
@@ -216,17 +169,14 @@ class CityGMLDoc:
         return self.resolve_xlink(property_el)
 
 
-# === geometry-text helpers (still pure XML, no math yet) =====================
-#  finds every bldg:Building anywhere in the tree 
+# === file-level readers =======================================================
 def buildings(doc):
-    """Every bldg:Building in the file (entry point for the readers)."""
+    """Every bldg:Building in the file."""
     return list(doc.iter_type("bldg", "Building"))
 
 
 def srs_name(doc):
-    """The document CRS string, e.g. 'urn:ogc:def:crs:EPSG::25832', read from the
-    first element that declares an srsName. (Parsing the EPSG code is geometry's
-    job — this module just hands back the raw string.)"""
+    """The file's CRS string, e.g. 'urn:ogc:def:crs:EPSG::25832' (the first srsName found), or None."""
     for el in doc.root.iter():
         s = el.get("srsName")
         if s:
@@ -274,7 +224,11 @@ def read_ring(doc, polygon):
         return [_point(nums[i:i + dim]) for i in range(0, len(nums) - dim + 1, dim)]
     positions = doc.children(ring[0], "gml", "pos")
     if positions:
-        return [_point([float(v) for v in (p.text or "").split()]) for p in positions]
+        points = []
+        for p in positions:
+            numbers = [float(v) for v in (p.text or "").split()]
+            points.append(_point(numbers))
+        return points
     written_as = sorted({local_name(c) for c in ring[0] if isinstance(c.tag, str)})
     warn(f"polygon {polygon.get(GML_ID)}: ring written as {written_as}; not supported yet "
          f"(only gml:posList or gml:pos)")
@@ -314,111 +268,8 @@ def surface_polygons(doc, geometry):
     else:
         warn(f"gml:{kind}: not supported yet")
         return []
-    return [pair for member in members if member is not None
-            for pair in surface_polygons(doc, member)]
-
-
-# === optional XSD validation gate ===========================================
-# WHY: the Energy ADE schema imports the CityGML/GML schemas by WEB URL
-# (http://schemas.opengis.net/...). To validate OFFLINE we intercept each of
-# those requests and serve the matching local file from validation_file/. The
-# whole gate is best-effort: if the schema can't be built (a needed import is
-# missing or unreachable) we WARN and continue — we never block a parse on it.
-
-VALIDATION_ROOT = os.path.join(_PKG, "validation_file")
-VALIDATION_SCHEMA_DIR = os.path.join(VALIDATION_ROOT, "CityGml_ADE_SChema")
-ENERGY_XSD = os.path.join(VALIDATION_SCHEMA_DIR, "Energy_ADE_3.0_beta7.xsd")
-
-
-class _LocalXSDResolver(etree.Resolver):
-    """Serve any imported schema (referenced by URL) from a local folder, matched
-    by file name. Returns None for anything we don't have -> lxml's default
-    behaviour takes over (which may then try the network)."""
-
-    def __init__(self, search_dirs):
-        self.search_dirs = search_dirs
-
-    def resolve(self, system_url, public_id, context):
-        if system_url:
-            name = os.path.basename(urlparse(system_url).path) or system_url
-            for d in self.search_dirs:
-                cand = os.path.join(d, name)
-                if os.path.isfile(cand):
-                    return self.resolve_filename(cand, context)
-        return None
-
-
-def build_schema(entry_xsd=ENERGY_XSD):
-    """Compile the Energy ADE schema, resolving its imports from validation_file/.
-    Raises on failure (caller decides whether to warn-and-skip)."""
-    if not os.path.isfile(entry_xsd):
-        raise FileNotFoundError(entry_xsd)
-    search = [
-        VALIDATION_SCHEMA_DIR,
-        os.path.join(VALIDATION_SCHEMA_DIR, "codelists"),
-        os.path.join(VALIDATION_SCHEMA_DIR, "gml3.1.1base"),
-    ]
-    parser = etree.XMLParser()
-    parser.resolvers.add(_LocalXSDResolver(search))
-    xsd_doc = etree.parse(entry_xsd, parser)
-    return etree.XMLSchema(xsd_doc)
-
-
-def validate(path=None, entry_xsd=ENERGY_XSD, max_report=15):
-    """Best-effort schema validation. Returns True/False when validation could
-    run, or None when the schema couldn't even be built (then we just warn)."""
-    try:
-        schema = build_schema(entry_xsd)
-    except Exception as e:
-        warn(f"validation skipped - could not build schema ({type(e).__name__}: {e})")
-        return None
-    try:
-        ok = schema.validate(etree.parse(path))
-    except Exception as e:
-        warn(f"validation skipped - could not validate ({type(e).__name__}: {e})")
-        return None
-    if ok:
-        print("[xml_io] XSD validation: PASSED")
-    else:
-        errs = list(schema.error_log)
-        warn(f"XSD validation found {len(errs)} issue(s) (showing up to {max_report}):")
-        for err in errs[:max_report]:
-            warn(f"  line {err.line}: {err.message}")
-    return ok
-
-
-# === demo ====================================================================
-
-def _demo(path=None):
-    validate(path)                       # best-effort schema gate (warns, never blocks)
-    doc = CityGMLDoc(path)
-    print(f"Loaded            : {os.path.basename(path)}")
-    print(f"CRS (srsName)     : {srs_name(doc)}")
-    print(f"Energy ADE URI    : {doc.ns['nrg']}")
-    print(f"gml:id elements   : {len(doc._by_id)}")
-
-    bs = buildings(doc)
-    print(f"Buildings         : {len(bs)}")
-    for b in bs:
-        bid = b.get(GML_ID)
-        lods = [l for l in ("lod1Solid", "lod2Solid", "lod3Solid")
-                if b.find(f".//{doc.qualified_name('bldg', l)}") is not None]
-        n_bounded = len(doc.descendants(b, "bldg", "boundedBy"))
-        n_zones = len(doc.descendants(b, "nrg", "ThermalZone"))
-        print(f"  - {bid:<12} geom={lods or ['(none)']}  "
-              f"boundedBy={n_bounded}  thermalZones={n_zones}")
-
-    # Prove xlink resolution + ring reading on the first referenced surface.
-    for sm in doc.iter_type("gml", "surfaceMember"):
-        if sm.get(XLINK_HREF):
-            target = doc.resolve_xlink(sm)
-            pairs = surface_polygons(doc, target) if target is not None else []
-            pts = pairs[0][1] if pairs else []
-            print(f"xlink demo        : {sm.get(XLINK_HREF)} -> "
-                  f"<{local_name(target)} id={target.get(GML_ID)}>, "
-                  f"{len(pts)} pts, first={pts[0] if pts else None}")
-            break
-
-
-if __name__ == "__main__":
-    _demo(sys.argv[1] if len(sys.argv) > 1 else None)
+    pairs = []
+    for member in members:
+        if member is not None:
+            pairs.extend(surface_polygons(doc, member))
+    return pairs

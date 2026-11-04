@@ -1,42 +1,25 @@
-"""
-ONE generic unit converter:  to_reference(field, value, uom) -> value in E+ units, or None.
+"""ONE unit converter: to_reference(field, value, uom) -> the value in EnergyPlus units, or None.
 
-Two DATA tables drive it (adding a unit or a field is one line of data):
-  QUANTITIES  per quantity: the reference unit we convert TO + every accepted uom -> its factor.
-  FIELDS      per CityGML/ADE element: which quantity it is.
+Two data tables drive it; adding a unit or a field is one line:
+  QUANTITIES  per quantity: the reference unit + every accepted uom -> its factor.
+  FIELDS      per ADE element: which quantity it is.
 
-CONTRACT: convert, or return None. None = "we do not accept that unit". We never guess an
-unknown unit was "probably already in E+ units" (that is how a BTU silently becomes a
-wrong-by-1000 building). The CALLER turns None into its own default; this module picks no value.
+CONTRACT: convert, or return None ("unit not accepted", warned). An unknown unit is never
+assumed to be the E+ unit; the caller picks the default. Whether the number is LEGAL
+(IDD minima, a 0..1 ratio) is also the caller's job.
 
-WHY THIS IS DANGEROUS: every ADE measure is a gml:MeasureType whose uom is an anyURI constrained
-by NOTHING, so any string can legally arrive.
-
-UNITS vs VALIDITY are separate jobs: this answers "what unit is this?". Whether the number is
-LEGAL (IDD minima, a 0..1 ratio) is the caller's (materials._resolve_field,
-openings._checked_ratio, constructions._valid_fraction).
-
-NOTE LIMIT: reads only a plain symbol ("mm"), not a URI reference ("#u23", "urn:...", "http://...").
-To support them: resolve the ref to its gml:catalogSymbol first, then look that up here.
+Why: every ADE measure is a gml:MeasureType whose uom is an anyURI restricted by nothing,
+so any string can arrive. LIMIT: a plain symbol ("mm") only, not a URI reference ("#u23",
+"urn:...", "http://..."); those would need their gml:catalogSymbol looked up first.
 """
 
 from __future__ import annotations
 from ..citygml.xml_io import warn
 
-# Energy+.idd `Material` N4 Specific Heat: `\minimum 100` (J/kg-K).
-MIN_SPECIFIC_HEAT = 100.0
-# Energy+.idd `Material:NoMass` N1 Thermal Resistance: `\minimum .001` (m2-K/W).
-MIN_NOMASS_RESISTANCE = 0.001
-
 # =============================================================================================
-# THE DATA — what we accept, and what we convert it to.
+# THE DATA — a uom is accepted only if it is listed here, spelled EXACTLY as written.
 # =============================================================================================
 # quantity -> (reference unit, {accepted uom: factor to multiply the value by})
-
-# THIS TABLE IS THE WHOLE ANSWER to "what do we accept?" — there is no logic anywhere that
-# computes, strips or guesses a unit. A uom is accepted if and only if it appears here, spelled
-# EXACTLY as written . Adding a unit is ONE LINE of DATA, and every accepted spelling is visible on the page.
-
 QUANTITIES = {
     "length": ("m", {
         "m": 1.0, "meter": 1.0, "meters": 1.0, "metre": 1.0, "metres": 1.0,
@@ -45,20 +28,16 @@ QUANTITIES = {
         "cm": 0.01, "centimeter": 0.01, "centimeters": 0.01,
         "centimetre": 0.01, "centimetres": 0.01,
         "dm": 0.1, "decimeter": 0.1, "decimetre": 0.1,
-        # we can expand it like :
-        #"ft":0.3048 , "in":0.0254
     }),
 
     "thermal_conductivity": ("W/(m*K)", {
-        # NO PREFIX — case carries no meaning here, so both spellings are simply listed.
+        # no prefix: case carries no meaning, so both spellings are listed
         "W/(m*K)": 1.0, "W/(K*m)": 1.0, "W/(m.K)": 1.0, "W/mK": 1.0,
         "W/m/K": 1.0, "W/m-K": 1.0, "W/m*K": 1.0,
         "w/(m*k)": 1.0, "w/(k*m)": 1.0, "w/(m.k)": 1.0, "w/mk": 1.0,
         "w/m/k": 1.0, "w/m-k": 1.0, "w/m*k": 1.0,
-        # PREFIXED — here the case IS the meaning: m = milli, M = mega, 10^9 apart. Both are
-        # listed, so both convert correctly.
-        # DO NOT ADD the all-lowercase "mw/..." : that spelling could be either milli or mega
-        # and nobody can tell, so it is left out on purpose and falls to the caller's default with a warning
+        # prefixed: case IS the meaning (m = milli, M = mega, 10^9 apart); both are listed.
+        # The all-lowercase "mw/..." is left out on purpose: milli or mega cannot be told apart.
         "mW/(m*K)": 0.001, "mW/(K*m)": 0.001, "mW/mK": 0.001, "mW/m-K": 0.001,
         "MW/(m*K)": 1e6, "MW/(K*m)": 1e6, "MW/mK": 1e6, "MW/m-K": 1e6,
         # kilo: "K" alone is kelvin, never a prefix, so lowercase "kw" is unambiguous.
@@ -118,18 +97,17 @@ QUANTITIES = {
     "scale": ("1", {
         "unit interval": 1.0, "unitinterval": 1.0, "unit": 1.0, "unity": 1.0,
         "ratio": 1.0, "fraction": 1.0, "dimensionless": 1.0, "1": 1.0, "-": 1.0,
-        "%": 0.01, "percent": 0.01, "pct": 0.01, "scale":1,
+        "%": 0.01, "percent": 0.01, "pct": 0.01, "scale": 1.0,
         "permil": 0.001, "promille": 0.001, "o/oo": 0.001, "‰": 0.001,
         "ppm": 0.000001, "parts-per-million": 0.000001, "partspermillion": 0.000001,
         "parts per million": 0.000001,
     }),
-    "air_change_rate": ("1/h",{
-        "1/h":1.0 , "h^-1": 1.0, "ach": 1.0, "1/s": 3600,
-    })
+    "air_change_rate": ("1/h", {
+        "1/h": 1.0, "h^-1": 1.0, "ach": 1.0, "1/s": 3600.0,
+    }),
 }
 
-# CityGML/ADE element name -> which quantity it is.
-# This is the whole "what do we accept for this field" answer, in one place.
+# ADE element name -> which quantity it is.
 FIELDS = {
     "thickness":                        "length",
     "thermalConductivity":              "thermal_conductivity",
@@ -137,14 +115,14 @@ FIELDS = {
     "specificHeatCapacity":             "specific_heat",
     "rValue":                           "thermal_resistance",
     "uValue":                           "u_value",
-    # gml:AreaType — the LoD2 "total - opaque" window source (openings.py path C)
+    # gml:AreaType: the LoD2 window source "total - opaque"
     "bdgBdrySurfTotalSurfaceArea":      "area",
     "bdgBdrySurfOpaqueSurfaceArea":     "area",
     # every gml:ScaleType we read
     "gValue":                           "scale",
     "fraction":                         "scale",   # transmittance/reflectance/emissivity
     "bdgBdrySurfOpeningToSurfaceRatio": "scale",
-    "infiltrationRate":                 "air_change_rate"
+    "infiltrationRate":                 "air_change_rate",
 }
 
 
@@ -152,27 +130,43 @@ FIELDS = {
 # THE LOGIC — one converter.
 # =============================================================================================
 def to_reference(field, value, uom, context=""):
-    """`value` in the reference unit for `field`, or None if we do not accept the uom.
+    """`value` in the reference unit of `field`, or None when the uom is not accepted.
 
-    ONE exact, case-SENSITIVE dict lookup — no lower-casing, no stripping, no prefix parsing.
-    Case is meaning: mW/(m*K) (milli) and MW/(m*K) (mega) are 10^9 apart, both listed separately.
-    An empty/absent uom is read as the reference unit (the one leniency we allow).
+    Parameters
+    ----------
+    field : str
+        The ADE element name (a FIELDS key), e.g. "thickness".
+    value : float or None
+        The number as written; None gives None.
+    uom : str
+        The uom as written; empty = the reference unit (the one leniency).
+    context : str
+        Names the value in the warning.
+
+    Returns
+    -------
+    float or None
+
+    Notes
+    -----
+    ONE exact, case-sensitive dict lookup; only padding spaces are trimmed. mW/(m*K)
+    (milli) and MW/(m*K) (mega) are 10^9 apart and listed separately.
     """
-    if value is None: # --> None (nothing to convert)
+    if value is None:
         return None
 
     quantity = FIELDS.get(field)
-    if quantity is None:                       # --> None + warn   (WE forgot to declare it)
+    if quantity is None:                       # a field we forgot to declare
         warn(f"{context or field}: no unit rule declared for field '{field}'; "
              f"value unusable, using the default")
         return None
 
     reference, accepted = QUANTITIES[quantity]
-    symbol = (uom or "").strip()               # trim padding only — CASE and inner spaces KEPT
-    if symbol == "":                           # uom absent -> assume the reference unit
+    symbol = (uom or "").strip()               # padding only; case and inner spaces kept
+    if symbol == "":                           # no uom -> the reference unit
         return value
 
-    factor = accepted.get(symbol)              # THE lookup: exact, case-sensitive
+    factor = accepted.get(symbol)              # exact, case-sensitive
     if factor is None:
         warn(f"{context or field}: unit '{uom}' is not accepted for {field} "
              f"(reference unit {reference}); value unusable, using the default")

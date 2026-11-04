@@ -1,7 +1,6 @@
-"""
-This module now holds the WHOLE typed middle layer (Material, Construction, Window,
-Surface, Zone, Building, WindowConstruction, Model).there is one
-Model, and the writer reads the fields it needs and ignores `provenance`.
+"""The typed middle layer: Model -> Building -> Zone / Surface -> Window, plus Construction /
+Material / WindowConstruction. Every object carries a flat `provenance` map (field -> one
+readable line); the writer reads the data fields and ignores it.
 """
 
 from __future__ import annotations
@@ -45,11 +44,10 @@ class Material:
 @dataclass
 class Construction:
     """An E+ Construction: ordered material-layer NAMES in ADE order (inside->outside).
-    The writer reverses to E+ outside->inside using `layer_order`. `layers` empty = the
+    The writer reverses every construction to E+ outside->inside. `layers` empty = the
     construction carried nothing usable (the resolver then falls to the default)."""
     name: str
     layers: list = field(default_factory=list)          # material names, ADE inside->outside
-    layer_order: str = "inside_to_outside"              # layer_order describes the stored list as seen from the zone that owns the surface using it
     source: str = ""                                    # citygml_layers | citygml_uvalue | default
     source_context_id: Optional[str] = None             # owner (surface/zone/building) it resolved from
     provenance: dict = field(default_factory=dict)      # notes (uValue conversion, reversed_of, …)
@@ -57,7 +55,7 @@ class Construction:
 
 @dataclass
 class Window:
-    """One fenestration opening on a wall (E+ FenestrationSurface:Detailed)."""
+    """One window or skylight on an outside wall or roof (E+ FenestrationSurface:Detailed)."""
     source_id: str
     points: list                                        # outward-wound vertices, metres, recentred
     area: float = 0.0
@@ -69,15 +67,14 @@ class Window:
 
 @dataclass
 class Surface:
-    """One envelope face (E+ BuildingSurface:Detailed). This is the SPINE: every parser
-    stage mutates it in place — building_surfaces creates it (geometry + role), reader
-    fills metric points + area, constructions sets `construction`, openings appends
-    `windows`, adjacency sets the facts below, zones sets `zone`/`surface_type` (orientation)
-    /`boundary`/`boundary_object`. `provenance` records one readable line per field."""
+    """One envelope face (E+ BuildingSurface:Detailed), filled in place stage by stage:
+    building_surfaces (geometry, role, type), reader (recentred points, area), constructions
+    (`construction`), adjacency (the facts below), zones (`zone`, `boundary`,
+    `boundary_object`; a LoD1 slab drawn as Roof becomes Ceiling), openings (`windows`).
+    `provenance` records one readable line per field."""
     source_id: str
-    source_gml_id: str = ""
     type_name: str = ""                                 # CityGML/ADE label, or "classified"
-    role: str = ""                                      # wall | roof | floor | ceiling
+    role: str = ""                                      # surface_types role: wall, roof, ground, party_wall, intermediate_floor, ...
     surface_type: str = ""                              # E+ Surface_Type: Wall/Roof/Floor/Ceiling
     boundary: str = ""                                  # Outdoors | Ground | Surface | Adiabatic
     points: list = field(default_factory=list)          # outward-wound vertices, metres, recentred
@@ -128,9 +125,8 @@ class Building:
 
 @dataclass
 class Model:
-    """The whole middle layer in ONE shape (no more trace/idf split): every building plus
-    the constructions/materials they use. The writer reads the fields it needs and ignores
-    `provenance`."""
+    """The whole middle layer: every building plus the constructions / materials / glazings
+    they use. The writer reads the fields it needs and ignores `provenance`."""
     crs: dict
     buildings: list                                       # list[Building]
     constructions: dict = field(default_factory=dict)     # name -> Construction
@@ -145,22 +141,27 @@ class Model:
         return None
 
     def subset_for_building(self, building_id):
-        """A new Model holding ONE building + only the constructions/materials/glazings it uses.
+        """A new Model holding ONE building + only the constructions / materials / glazings it uses.
 
-        The sets answer only "is this name used?"; the subset dicts are built by iterating
-        the POOLS, whose insertion order is the GML discovery order. Iterating the sets
-        instead made the same input produce a differently-ordered IDF/JSON on every run
-        (Python reshuffles a set of strings per process)."""
+        The sets only answer "is this name used?"; each subset dict follows its POOL's order
+        (the file's discovery order), so the same input always gives the same IDF and JSON.
+        """
         building = self.building(building_id)
         if building is None:
             raise KeyError(f"building '{building_id}' not found")
         construction_names = {s.construction for s in building.surfaces if s.construction}
         constructions_used = {name: c for name, c in self.constructions.items()
                               if name in construction_names}
-        material_names = {m for c in constructions_used.values() for m in c.layers}
+        material_names = set()
+        for construction in constructions_used.values():
+            material_names.update(construction.layers)
         materials_used = {name: m for name, m in self.materials.items()
                           if name in material_names}
-        glazing_names = {w.construction for s in building.surfaces for w in s.windows if w.construction}
+        glazing_names = set()
+        for surface in building.surfaces:
+            for window in surface.windows:
+                if window.construction:
+                    glazing_names.add(window.construction)
         glazings_used = {name: g for name, g in self.window_constructions.items()
                          if name in glazing_names}
         return Model(crs=self.crs, buildings=[building],

@@ -33,7 +33,7 @@ def ensure_idd(idd_path=IDD_PATH):
 def new_empty_idf():
     """Create base IDF settings for a weather-file free-floating run."""
     idf = IDF(StringIO(""))
-    idf.newidfobject("VERSION", Version_Identifier="23.1")
+    idf.newidfobject("VERSION", Version_Identifier="23.1") #NOTE change the version 
     idf.newidfobject("TIMESTEP", Number_of_Timesteps_per_Hour=4)
     idf.newidfobject("BUILDING", Name="Building", North_Axis=0.0, Terrain="City",
                      # FullExterior: all beam solar entering a zone lands on the FLOOR.
@@ -143,11 +143,9 @@ def add_materials(idf, materials):
 
 
 def _energyplus_layers(construction):
-    """Return construction layers in EnergyPlus outside-to-inside order."""
-    layers = list(construction.layers)
-    if construction.layer_order == "inside_to_outside":
-        return list(reversed(layers))
-    return layers
+    """The layers in EnergyPlus order, outside first (IDD Construction: "Start with outside
+    layer"); the ADE lists them inside -> outside, so every construction is reversed."""
+    return list(reversed(construction.layers))
 
 
 def add_constructions(idf, constructions):
@@ -204,8 +202,8 @@ def add_infiltration(idf, building):
     Infiltration = outdoor air leaking in through the fabric. In a free-float run it is the
     direct air-to-air link to outdoors, so a zone without it floats like a thermos flask.
 
-    PRESENCE-BASED: a zone whose file gave no nrg3:infiltrationRate gets no object (zones.py
-    already warned). The infiltration Output:Variables are requested only when at least one
+    PRESENCE-BASED: a zone whose file gave no nrg3:infiltrationRate gets no object
+    (model/zone_physics.py already warned). The infiltration Output:Variables are requested only when at least one
     object exists — E+ warns about a variable it cannot produce, and that would pollute the
     clean-.err gate on every windowless/sealed run.
 

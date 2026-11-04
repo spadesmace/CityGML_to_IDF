@@ -1,5 +1,5 @@
 """
-geometry/rings.py — pure math on one polygon ring (a list of (x, y, z) points).
+geometry/rings.py — pure math on polygon rings (each a list of (x, y, z) points).
 
 No XML and no EnergyPlus here: the readers hand in points, these functions return numbers,
 True/False, or points. A ring's DIRECTION is its vertex order (GML3 / CityGML 2.0: counter-clockwise
@@ -9,6 +9,7 @@ seen from the side the normal points to), and EnergyPlus GlobalGeometryRules use
 from __future__ import annotations
 
 import numpy as np
+
 
 # E+ wants each corner once
 def drop_closing_point(points):
@@ -33,6 +34,7 @@ def drop_closing_point(points):
     if len(points) >= 2 and np.allclose(points[0], points[-1], rtol=0.0, atol=1e-6):
         return [tuple(p) for p in points[:-1]]
     return [tuple(p) for p in points]
+
 
 # get the direction of each surface
 def normal_vector(points):
@@ -86,7 +88,7 @@ def polygon_area(points):
     return 0.5 * float(np.linalg.norm(normal_vector(points)))
 
 
-# To compare direction roof UP , floor Down, wall side!! 
+# the direction only (length 1): roof up, floor down, wall sideways
 def unit_normal(points):
     """The ring's normal scaled to length 1.
 
@@ -104,7 +106,8 @@ def unit_normal(points):
     length = np.linalg.norm(n)
     return n / length if length > 0 else n
 
-# TO move building to (0,0,0) instead of  reprojection  for GlobalGeometry World E+
+
+# moves each building to (0, 0, 0) instead of a reprojection (E+ GlobalGeometryRules: World)
 def min_corner(ring_list):
     """The lowest x, y and z over every point of several rings.
 
@@ -119,10 +122,13 @@ def min_corner(ring_list):
         (min x, min y, min z): the corner a building is recentred to, so its own origin is
         (0, 0) and its floor sits at z = 0. Coordinates are assumed metric (no reprojection).
     """
-    allpts = np.array([p for ring in ring_list for p in ring], dtype=float)
-    return allpts.min(axis=0)
+    points = []
+    for ring in ring_list:
+        points.extend(ring)
+    return np.array(points, dtype=float).min(axis=0)
 
-# It read all windows's points 
+
+# E+ windows have at most 4 corners: a bigger window becomes a same-area rectangle
 def same_area_quad(points):
     """A window ring with more than 4 corners turned into a rectangle of the same area.
 
@@ -145,10 +151,8 @@ def same_area_quad(points):
     edge can reach past the edge of its wall.
     """
     corners = drop_closing_point(points)
-    if len(corners) <= 4:
-        return [(float(x), float(y), float(z)) for (x, y, z) in corners]
     normal = unit_normal(corners)
-    if float(np.linalg.norm(normal)) == 0.0:          # no area: nothing to turn into a rectangle
+    if len(corners) <= 4 or float(np.linalg.norm(normal)) == 0.0:   # allowed already, or no area
         return [(float(x), float(y), float(z)) for (x, y, z) in corners]
 
     # 1. two directions lying flat in the window's plane: "across" (level) and "up"
@@ -186,7 +190,8 @@ def same_area_quad(points):
         rectangle = list(reversed(rectangle))
     return [(float(x), float(y), float(z)) for (x, y, z) in rectangle]
 
-# ONLY for LOD3 WINDOW : Reverse corner if it faces against the parent wall 
+
+# only for LoD3 windows: reverse the corners if the window faces against its wall
 def face_like(points, reference_normal):
     """The ring wound so that its normal agrees with a reference normal.
 
@@ -251,3 +256,35 @@ def is_convex(points):
         if float(np.dot(turn, normal)) < -1e-9:
             return False
     return True
+
+
+# NOTE multizone: finds the face on the other side of a face between zones (stacked or
+# side by side) when the file has no relatedTo — the second way to find the pair.
+def same_corners(points_a, points_b):
+    """True when two rings have the same corner points, in any order.
+
+    Parameters
+    ----------
+    points_a, points_b : sequence of (x, y, z)
+        Two rings (closing point optional).
+
+    Returns
+    -------
+    bool
+        True when both rings have exactly the same corners, compared to the millimetre,
+        whatever their order or starting corner.
+
+    Notes
+    -----
+    Each zone writes its own face of a shared wall or slab, pointing out of its own zone, so
+    the two faces have the same corners in opposite order (CityGML 2.0 / GML3 ring
+    orientation). Sorting removes the order; rounding to the millimetre removes tiny
+    floating-point differences.
+    """
+    corners_a = []
+    for x, y, z in drop_closing_point(points_a):
+        corners_a.append((round(x, 3), round(y, 3), round(z, 3)))
+    corners_b = []
+    for x, y, z in drop_closing_point(points_b):
+        corners_b.append((round(x, 3), round(y, 3), round(z, 3)))
+    return sorted(corners_a) == sorted(corners_b)
