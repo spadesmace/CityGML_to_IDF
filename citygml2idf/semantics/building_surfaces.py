@@ -8,7 +8,7 @@ Where the surfaces come from (select_surface_path):
 
 Returns ONE uniform list of Surface objects, so zones / constructions / writer never care
 which LoD the file was (openings reads Building.lod). Surfaces and geometry may be inline or
-xlinked. Points stay as written: the FILE's winding, not yet recentred (model/reader.py).
+xlinked. Points stay as written: the FILE's winding, not yet lowered to the ground (model/reader.py).
 
 LIMITS: ONE bldg:Building = ONE IDF (bldg:BuildingPart is not read); coordinates are
 assumed metric (no CRS check, no reprojection).

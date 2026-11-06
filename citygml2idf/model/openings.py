@@ -77,17 +77,17 @@ def window_ring(doc, window_element):
 
 
 # LoD3 only: explicit windows
-def explicit_windows(doc, surface_element, surface_points, origin_offset, window_constructions):
-    """The LoD3 bldg:Window polygons of one surface, recentred, each with its own glazing.
+def explicit_windows(doc, surface_element, surface_points, ground_height, window_constructions):
+    """The LoD3 bldg:Window polygons of one surface, lowered like their building, each with its
+    own glazing.
 
     Notes
     -----
     The surface keeps the file's winding; each window is re-wound to face the same way
     (rings.face_like): the writer declares every polygon Counterclockwise "as viewed from
     OUTSIDE" (GlobalGeometryRules), and a window facing against its surface crashes
-    EnergyPlus. Recentring is a translation, so it cannot change a normal.
+    EnergyPlus. Lowering is a translation, so it cannot change a normal.
     """
-    offset_x, offset_y, offset_z = origin_offset
     surface_normal = rings.unit_normal(rings.drop_closing_point(surface_points))
     found_windows = []
     # surface → bldg:opening → bldg:Window
@@ -101,10 +101,9 @@ def explicit_windows(doc, surface_element, surface_points, origin_offset, window
                  f"(not supported yet); no window")
             continue
         quad = rings.same_area_quad(ring)              # E+ fenestration is capped at 4 vertices
-        recentred_points = [[float(x - offset_x), float(y - offset_y), float(z - offset_z)]
-                            for (x, y, z) in quad]
-        aligned, _normal = rings.face_like(recentred_points, surface_normal)   # face the surface's way
-        was_reversed = [list(p) for p in aligned] != recentred_points
+        lowered_points = [[float(x), float(y), float(z - ground_height)] for (x, y, z) in quad]
+        aligned, _normal = rings.face_like(lowered_points, surface_normal)   # face the surface's way
+        was_reversed = [list(p) for p in aligned] != lowered_points
         if was_reversed:
             warn(f"window {window_element.get(GML_ID)}: vertices ran opposite to "
                  f"wall {surface_element.get(GML_ID)}; re-wound to face the same way")
@@ -199,7 +198,7 @@ def synthesize_window(surface_points, window_to_wall_ratio):
     return window
 
 
-def windows_for_surface(doc, surface_element, surface_points, origin_offset,
+def windows_for_surface(doc, surface_element, surface_points, ground_height,
                         window_constructions, lod):
     """One outside wall or roof -> its list of Window objects ([] = opaque).
 
@@ -210,9 +209,9 @@ def windows_for_surface(doc, surface_element, surface_points, origin_offset,
     surface_element : lxml element
         The wall's or roof's boundary surface.
     surface_points : list
-        Its recentred points (file winding).
-    origin_offset : list
-        The building's recentring shift.
+        Its points, lowered to the building's ground (file winding).
+    ground_height : float
+        The height the building was lowered by (Building.ground_height).
     window_constructions : dict
         The model's glazing pool, filled in place.
     lod : int or None
@@ -238,7 +237,7 @@ def windows_for_surface(doc, surface_element, surface_points, origin_offset,
     remains around the glass; `wwr` keeps the file's own ratio.
     """
     if lod == 3:                                                      # LoD3: openings ONLY
-        return explicit_windows(doc, surface_element, surface_points, origin_offset,
+        return explicit_windows(doc, surface_element, surface_points, ground_height,
                                 window_constructions)
 
     window_to_wall_ratio, ratio_note = window_to_wall_ratio_from_attributes(doc, surface_element)
@@ -281,7 +280,7 @@ def resolve_windows(doc, middle):
     """
     window_constructions = {}
     for building in middle.buildings:
-        origin_offset = building.origin_offset or [0.0, 0.0, 0.0]
+        ground_height = building.ground_height or 0.0
         for surface in building.surfaces:
             if surface.role not in ("wall", "roof") or surface.boundary != "Outdoors":
                 continue                                         # windows only on exterior walls and roofs
@@ -290,7 +289,7 @@ def resolve_windows(doc, middle):
                 continue
 
             # for each outside wall or roof, it calls windows_for_surface()
-            windows = windows_for_surface(doc, surface_element, surface.points, origin_offset,
+            windows = windows_for_surface(doc, surface_element, surface.points, ground_height,
                                           window_constructions, building.lod)
             if windows:
                 surface.windows = windows

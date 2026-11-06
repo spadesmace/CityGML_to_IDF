@@ -107,9 +107,9 @@ def unit_normal(points):
     return n / length if length > 0 else n
 
 
-# moves each building to (0, 0, 0) instead of a reprojection (E+ GlobalGeometryRules: World)
-def min_corner(ring_list):
-    """The lowest x, y and z over every point of several rings.
+#NOTE  the height a building is lowered by: EnergyPlus reads z as the height above the ground
+def lowest_z(ring_list):
+    """The lowest z over every point of several rings.
 
     Parameters
     ----------
@@ -118,14 +118,15 @@ def min_corner(ring_list):
 
     Returns
     -------
-    numpy.ndarray
-        (min x, min y, min z): the corner a building is recentred to, so its own origin is
-        (0, 0) and its floor sits at z = 0. Coordinates are assumed metric (no reprojection).
+    float
+        The height a building is lowered by, so that its lowest point sits at z = 0.
     """
-    points = []
+    lowest = None
     for ring in ring_list:
-        points.extend(ring)
-    return np.array(points, dtype=float).min(axis=0)
+        for point in ring:
+            if lowest is None or point[2] < lowest:
+                lowest = float(point[2])
+    return lowest
 
 
 # E+ windows have at most 4 corners: a bigger window becomes a same-area rectangle

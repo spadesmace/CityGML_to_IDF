@@ -57,7 +57,7 @@ class Construction:
 class Window:
     """One window or skylight on an outside wall or roof (E+ FenestrationSurface:Detailed)."""
     source_id: str
-    points: list                                        # outward-wound vertices, metres, recentred
+    points: list                                        # outward-wound vertices, metres, lowered to the building's ground
     area: float = 0.0
     source: str = ""                                    # "explicit" (LoD3 polygon) | "wwr" (synthesized)
     construction: str = ""                              # glazing construction name (key into Model.window_constructions)
@@ -68,7 +68,7 @@ class Window:
 @dataclass
 class Surface:
     """One envelope face (E+ BuildingSurface:Detailed), filled in place stage by stage:
-    building_surfaces (geometry, role, type), reader (recentred points, area), constructions
+    building_surfaces (geometry, role, type), reader (points lowered to the ground, area), constructions
     (`construction`), adjacency (the facts below), zones (`zone`, `boundary`,
     `boundary_object`; a LoD1 slab drawn as Roof becomes Ceiling), openings (`windows`).
     `provenance` records one readable line per field."""
@@ -77,7 +77,7 @@ class Surface:
     role: str = ""                                      # surface_types role: wall, roof, ground, party_wall, intermediate_floor, ...
     surface_type: str = ""                              # E+ Surface_Type: Wall/Roof/Floor/Ceiling
     boundary: str = ""                                  # Outdoors | Ground | Surface | Adiabatic
-    points: list = field(default_factory=list)          # outward-wound vertices, metres, recentred
+    points: list = field(default_factory=list)          # outward-wound vertices, metres, lowered to the building's ground
     area: float = 0.0
     construction: str = ""                              # construction name (key into Model.constructions)
     zone: str = ""                                      # owning E+ Zone name
@@ -119,7 +119,7 @@ class Building:
     surfaces: list = field(default_factory=list)         # list[Surface]
     lod: Optional[int] = None                            # the ONE LoD the building is read in
     surface_path: str = ""                               # which SurfacePath produced the surfaces
-    origin_offset: Optional[list] = None                 # site min-corner shift undone at recentre
+    ground_height: Optional[float] = None                # the z the building was lowered by (lowest point -> 0)
     provenance: dict = field(default_factory=dict)
 
 

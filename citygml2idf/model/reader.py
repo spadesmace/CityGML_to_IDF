@@ -3,8 +3,8 @@ model/reader.py — builds the ONE middle layer (model.Model) from a parsed City
 
 build_middle_layer runs the steps in this order; each changes the same Model in place:
   1. building_surfaces.surfaces_of_building  each Building's ONE LoD and its Surface list
-  2. recentre                                each building moved to its own lowest corner
-                                             (one IDF per building; origin_offset keeps the shift)
+  2. lower to the ground                     each building lowered so its lowest point is z = 0
+                                             (x, y kept; Building.ground_height keeps the drop)
   3. constructions.resolve_all               every surface's construction and materials
   4. adjacency.attach_facts                  isAdiabatic / relatedTo, read from the file
   5. zones.assign_zones                      zones, ownership, boundaries
@@ -71,22 +71,27 @@ def build_middle_layer(doc, detailed_interior=False):
         buildings.append(Building(id=building_element.get(GML_ID), lod=lod_n,
                                   surface_path=surface_path.value, surfaces=surfaces))
 
-    # 2. recentre EACH building to its own origin (one IDF per building) and
-    #    record the shift so we still know the building's true site position.
+    # 2. lower EACH building so its lowest point is at z = 0; x and y stay as in the file.
+    #    NOTE why z: EnergyPlus reads z as the height above the ground. It computes the outdoor
+    #    air temperature and the wind speed at the height of every surface (IDD
+    #    Site:HeightVariation: when the object is absent, "the default model for temperature
+    #    dependence on height is used" (Air Temperature Gradient Coefficient 0.0065 K/m) and the
+    #    wind follows the Building Terrain; I/O Reference: "calculated at the height above ground
+    #    of the surface centroid"). A file's z is usually the height above sea level, which would
+    #    lift the building that high into the air. The drop is kept in Building.ground_height.
     for building in buildings:
         surface_rings = [surface.points for surface in building.surfaces]
         if not surface_rings:
             continue
-        ox, oy, oz = rings.min_corner(surface_rings)
+        ground_height = rings.lowest_z(surface_rings)
         for surface in building.surfaces:
-            surface.points = [[float(x - ox), float(y - oy), float(z - oz)]
+            surface.points = [[float(x), float(y), float(z - ground_height)]
                               for (x, y, z) in surface.points]
             surface.area = round(rings.polygon_area(surface.points), 3)  # from the polygon points
             surface.provenance["points"] = ("gml:posList (assumed metric) -> file winding kept "
-                                            "-> recentre to building origin "
-                                            f"{[round(float(ox), 1), round(float(oy), 1), round(float(oz), 1)]}")
-            surface.provenance["area"] = f"{surface.area} m2 (derived from recentred points)"
-        building.origin_offset = [float(ox), float(oy), float(oz)]
+                                            f"-> lowered by the ground height {round(ground_height, 3)} m")
+            surface.provenance["area"] = f"{surface.area} m2 (derived from the points)"
+        building.ground_height = ground_height
 
     srs_name = xml_io.srs_name(doc)              # coordinates assumed metric; kept for the record
     model = Model(crs={"srsName": srs_name, "epsg": _parse_epsg(srs_name),

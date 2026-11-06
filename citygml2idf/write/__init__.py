@@ -1,7 +1,5 @@
-"""write — MIDDLE LAYER → EnergyPlus IDF.
+"""write — the middle layer -> one EnergyPlus IDF per building.
 
-writer.py builds one empty IDF per building (eppy newidfobject, block by block) from
-output/middle_layer.json — Zone + BuildingSurface:Detailed + Construction +
-Material/NoMass/AirGap — then runs EnergyPlus 23.1 to check for Severe/Fatal.
-Reuses the old internship code only as an eppy PATTERN, never its extrusion.
+writer.py builds each IDF with eppy. It writes files only; running EnergyPlus is a separate
+step.
 """

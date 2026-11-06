@@ -4,6 +4,8 @@ __pycache__/
 
 # Generated EnergyPlus / parser outputs
 citygml2idf/output/
+# The report's own pipeline runs (rebuilt by: python -m report.make_report)
+/report/runs/
 
 # Local EnergyPlus and FMU installations are kept outside Git.
 citygml2idf/templates/EnergyPlus-*/
@@ -22,21 +24,17 @@ citygml2idf/templates/EnergyPlusToFMU/
 *.shd
 *.idf
 *.epw
+# ...except the weather file the samples and the report are run with
+!citygml2idf/input/ITA_PM_Torino.AF.160595_TMYx.2011-2025.epw
 *.fmu
 
-# Local generated previews
-*_preview.png
 
 # Full CityGML 2.0 + Energy ADE 3.0 schema set, codelists and spec text: local reference only.
-# The subset the XSD gate needs stays tracked in citygml2idf/validation_file/CityGml_ADE_SChema/.
 /citygml2idf/CityGml_ADE_SChema/
+
+# Official Energy ADE sample files (Alderaan) and old reference IDFs: local testing only.
+/citygml2idf/validation_file/
 
 # Docs / notes kept local only, never pushed
 *.md
 
-# Local-only runner + template data (EnergyPlus/FMU software is not in the repo).
-# Only Energy+.idd stays tracked in templates/.
-# compare with sqlite is also ignored (local)
-citygml2idf/run_energyplus.py
-citygml2idf/templates/*.json
-citygml2idf/compare.py  

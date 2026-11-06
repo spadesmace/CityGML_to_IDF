@@ -1,6 +1,5 @@
-"""citygml — the 'read the CityGML file' duty.
+"""citygml — reads the CityGML file.
 
-The only place in citygml2idf that touches lxml/XML. Everything downstream
-(geometry, semantics, model, write) consumes the clean Python this package
-hands back, so swapping the XML library only ever changes code in here.
+The only package that imports lxml: xml_io (parse, gml:ids, xlinks, rings) and citygml_read
+(one child value of an element). The other packages walk the file only through these two.
 """

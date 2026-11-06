@@ -1,0 +1,25 @@
+# citygml2idf: the Python packages. Install from the repository root with:
+#     python -m pip install -r requirements.txt
+# Tested with Python 3.11.9 on Windows 11, with exactly these versions.
+
+lxml==6.0.2        # reads the CityGML XML                  (citygml/xml_io.py)
+numpy==2.2.6       # polygon maths: normals, areas           (geometry/rings.py)
+eppy==0.5.63       # writes the IDF against the IDD          (write/writer.py)
+
+matplotlib==3.9.3  # the test report's figures, only for report/ (report/figures.py)
+
+# NOT Python packages: pip cannot install these programs. Install them yourself.
+#
+#   EnergyPlus 26.2.0      needed to RUN an IDF (not to write one). Installer for your system:
+#                          https://github.com/NatLabRockies/EnergyPlus/releases/tag/v26.2.0
+#                          tools/energyplus.py finds it through ENERGYPLUS_EXE, else the PATH,
+#                          and stops unless it is version 26.2 (the IDF's Version field).
+#   EnergyPlusToFMU 3.1.0  later, for the FMU step (LBNL):
+#                          https://github.com/lbl-srg/EnergyplusToFMU/releases/tag/v3.1.0
+#                          needs Python plus a C and a C++ compiler and linker (its user guide);
+#                          running an FMU needs the same EnergyPlus version on the PATH.
+#   Docker                 optional, only for energyplus-mcp (an AI assistant that opens and
+#                          runs the IDFs): https://github.com/LBNL-ETA/energyplus-mcp
+#
+# Already in the repository, nothing to install: the EnergyPlus 26.2 IDD
+# (citygml2idf/templates/Energy+.idd) that the writer needs.
